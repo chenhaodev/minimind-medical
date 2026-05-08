@@ -71,7 +71,7 @@ Loads the existing `pretrain` weights and continues training on the medical text
 
 ```bash
 python trainer/train_pretrain.py \
-  --data_path ../dataset/pretrain_medical.jsonl \
+  --data_path dataset/pretrain_medical.jsonl \
   --from_weight pretrain \
   --save_weight pretrain_medical \
   --learning_rate 1e-4 \
@@ -88,7 +88,7 @@ Fine-tunes the medical pretrain checkpoint on bilingual instruction pairs to tea
 
 ```bash
 python trainer/train_full_sft.py \
-  --data_path ../dataset/sft_medical.jsonl \
+  --data_path dataset/sft_medical.jsonl \
   --from_weight pretrain_medical \
   --save_weight full_sft_medical \
   --learning_rate 5e-6 \

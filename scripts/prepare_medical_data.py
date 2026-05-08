@@ -503,6 +503,6 @@ if __name__ == "__main__":
             validate(sft_path)
 
     print("\nDone. Next steps:")
-    print("  1. python trainer/train_pretrain.py --data_path ../dataset/pretrain_medical.jsonl --from_weight pretrain --save_weight pretrain_medical --learning_rate 1e-4 --epochs 1")
-    print("  2. python trainer/train_full_sft.py  --data_path ../dataset/sft_medical.jsonl    --from_weight pretrain_medical --save_weight full_sft_medical --learning_rate 5e-6 --epochs 1")
+    print("  1. python trainer/train_pretrain.py --data_path dataset/pretrain_medical.jsonl --from_weight pretrain --save_weight pretrain_medical --learning_rate 1e-4 --epochs 1")
+    print("  2. python trainer/train_full_sft.py  --data_path dataset/sft_medical.jsonl    --from_weight pretrain_medical --save_weight full_sft_medical --learning_rate 5e-6 --epochs 1")
     print("  3. python eval_llm.py --weight full_sft_medical")

@@ -73,12 +73,20 @@ def _clean(text: str) -> str:
 
 
 def _normalize_conversations(conversations: list) -> list:
-    """Convert ShareGPT-format (from/value) or mixed dicts to MiniMind role/content format."""
+    """Convert ShareGPT-format (from/value) or mixed dicts to MiniMind role/content format.
+
+    Always passes the role through _SHAREGPT_ROLE_MAP so that ShareGPT-style
+    values like "gpt" or "human" found in the `role` field are normalised to
+    "assistant" / "user" rather than passed through verbatim.
+    """
     out = []
     for turn in conversations:
         if not isinstance(turn, dict):
             continue
-        role = turn.get("role") or _SHAREGPT_ROLE_MAP.get(str(turn.get("from", "")), "")
+        # Prefer `role` field; fall back to ShareGPT `from` field
+        raw_role = str(turn.get("role") or turn.get("from") or "")
+        # Always map through the alias table; unknown roles produce "" → turn dropped
+        role = _SHAREGPT_ROLE_MAP.get(raw_role, "")
         content = turn.get("content") or turn.get("value") or ""
         if role and isinstance(content, str):
             out.append({"role": role, "content": _clean(content)})
@@ -133,28 +141,15 @@ def _maybe_add_system(conversations: list, ratio: float = 0.2) -> list:
 # Pretrain sources
 # ---------------------------------------------------------------------------
 
-def load_pretrain_shibing624_medical() -> list:
-    """shibing624/medical — disease/drug/symptom knowledge base."""
-    print("  [ZH] Loading shibing624/medical ...")
-    records = []
-    for config in ("pretrain", "medical_book"):
-        try:
-            ds = load_dataset("shibing624/medical", config, split="train", trust_remote_code=True)
-            for row in ds:
-                text = _clean(str(row.get("text") or row.get("content") or ""))
-                if len(text) >= 50 and not _is_garbled(text):
-                    records.append({"text": text})
-        except Exception as e:
-            print(f"    shibing624/medical[{config}] skipped: {e}")
-    print(f"    → {len(records):,} entries")
-    return records
+def load_pretrain_huatuo_gpt_as_text(max_samples: int = 50_000) -> list:
+    """FreedomIntelligence/HuatuoGPT-sft-data-v1 — use as ZH medical pretrain text.
 
-
-def load_pretrain_huatuo26m(max_samples: int = 300_000) -> list:
-    """FreedomIntelligence/Huatuo-26M — convert Q&A to plain text."""
-    print("  [ZH] Loading Huatuo-26M (text conversion) ...")
+    Schema: each row has a `data` field = [question_str, answer_str] where
+    strings are already prefixed with "问：" / "答：".
+    """
+    print(f"  [ZH] Loading HuatuoGPT-sft-data-v1 as pretrain text (up to {max_samples:,}) ...")
     try:
-        ds = load_dataset("FreedomIntelligence/Huatuo-26M", split="train", streaming=True, trust_remote_code=True)
+        ds = load_dataset("FreedomIntelligence/HuatuoGPT-sft-data-v1", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -162,21 +157,20 @@ def load_pretrain_huatuo26m(max_samples: int = 300_000) -> list:
     for i, row in enumerate(ds):
         if i >= max_samples:
             break
-        q = _clean(str(row.get("question") or row.get("input") or ""))
-        a = _clean(str(row.get("answer") or row.get("output") or ""))
-        if len(q) >= 10 and len(a) >= 20:
-            text = f"问：{q}\n答：{a}"
-            if not _is_garbled(text):
+        data = row.get("data") or []
+        if isinstance(data, list) and len(data) >= 2:
+            text = _clean("\n".join(str(s) for s in data if s))
+            if len(text) >= 30 and not _is_garbled(text):
                 records.append({"text": text})
     print(f"    → {len(records):,} entries")
     return records
 
 
-def load_pretrain_pubmed(max_samples: int = 500_000) -> list:
-    """ncbi/pubmed — PubMed abstracts (English)."""
-    print(f"  [EN] Loading PubMed abstracts (up to {max_samples:,}) ...")
+def load_pretrain_pubmed(max_samples: int = 50_000) -> list:
+    """ccdv/pubmed-summarization — PubMed abstracts (English, Parquet-based)."""
+    print(f"  [EN] Loading PubMed abstracts via ccdv/pubmed-summarization (up to {max_samples:,}) ...")
     try:
-        ds = load_dataset("ncbi/pubmed", split="train", streaming=True, trust_remote_code=True)
+        ds = load_dataset("ccdv/pubmed-summarization", "document", split="train", streaming=True)
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -184,24 +178,8 @@ def load_pretrain_pubmed(max_samples: int = 500_000) -> list:
     for i, row in enumerate(ds):
         if i >= max_samples:
             break
-        abstract = ""
-        # Nested schema (MedlineCitation hierarchy)
-        medline = row.get("MedlineCitation")
-        if isinstance(medline, dict):
-            article = medline.get("Article")
-            if isinstance(article, dict):
-                abstract_obj = article.get("Abstract")
-                if isinstance(abstract_obj, dict):
-                    raw = abstract_obj.get("AbstractText", "")
-                    # AbstractText can be a list of structured paragraphs or a plain string
-                    if isinstance(raw, list):
-                        abstract = " ".join(str(x) for x in raw if x)
-                    else:
-                        abstract = str(raw or "")
-        # Flat schema fallback (some HF versions expose a top-level "abstract" field)
-        if not abstract:
-            abstract = str(row.get("abstract") or "")
-        abstract = _clean(abstract)
+        # "abstract" field contains the abstract; "article" is the full paper
+        abstract = _clean(str(row.get("abstract") or ""))
         if len(abstract) >= 50 and not _is_garbled(abstract):
             records.append({"text": abstract})
     print(f"    → {len(records):,} entries")
@@ -212,7 +190,7 @@ def load_pretrain_wikidoc() -> list:
     """medalpaca/medical_meadow_wikidoc — medical reference text (English)."""
     print("  [EN] Loading medical_meadow_wikidoc ...")
     try:
-        ds = load_dataset("medalpaca/medical_meadow_wikidoc", split="train", trust_remote_code=True)
+        ds = load_dataset("medalpaca/medical_meadow_wikidoc", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -230,7 +208,7 @@ def load_pretrain_medrag_textbooks() -> list:
     """MedRAG/textbooks — chunked medical textbook passages (English)."""
     print("  [EN] Loading MedRAG/textbooks ...")
     try:
-        ds = load_dataset("MedRAG/textbooks", split="train", trust_remote_code=True)
+        ds = load_dataset("MedRAG/textbooks", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -248,35 +226,45 @@ def load_pretrain_medrag_textbooks() -> list:
 # ---------------------------------------------------------------------------
 
 def load_sft_huatuo_gpt() -> list:
-    """FreedomIntelligence/HuatuoGPT-sft-data-v1 — 226k high-quality ZH pairs."""
+    """FreedomIntelligence/HuatuoGPT-sft-data-v1 — 226k high-quality ZH pairs.
+
+    Schema: each row has `data` = [question_str, answer_str] prefixed with 问：/答：.
+    """
     print("  [ZH] Loading HuatuoGPT-sft-data-v1 ...")
     try:
-        ds = load_dataset("FreedomIntelligence/HuatuoGPT-sft-data-v1", split="train", trust_remote_code=True)
+        ds = load_dataset("FreedomIntelligence/HuatuoGPT-sft-data-v1", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
+    def _strip_prefix(s, prefix):
+        s = _clean(str(s))
+        return s[len(prefix):].strip() if s.startswith(prefix) else s
+
     records = []
     for row in ds:
-        raw_convs = row.get("conversations") or []
-        conversations = _normalize_conversations(raw_convs) if raw_convs else []
-        if not conversations:
-            # Fallback: flat instruction/output fields
-            q = _clean(str(row.get("input") or row.get("instruction") or ""))
-            a = _clean(str(row.get("output") or row.get("answer") or ""))
-            if len(q) >= 5 and len(a) >= 20:
-                conversations = [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
-        if conversations and _has_assistant_content(conversations):
-            conversations = _maybe_add_system(conversations)
+        data = row.get("data") or []
+        if not (isinstance(data, list) and len(data) >= 2):
+            continue
+        q = _strip_prefix(data[0], "问：")
+        a = _strip_prefix(data[1], "答：")
+        if len(q) >= 5 and len(a) >= 20 and not _is_garbled(a):
+            conversations = _maybe_add_system([
+                {"role": "user", "content": q},
+                {"role": "assistant", "content": a},
+            ])
             records.append({"conversations": conversations})
     print(f"    → {len(records):,} entries")
     return records
 
 
 def load_sft_disc_med(max_samples: int = 100_000) -> list:
-    """Flmc/DISC-Med-SFT — Chinese multi-turn medical consultations."""
+    """Flmc/DISC-Med-SFT — Chinese multi-turn medical consultations.
+
+    Schema: `conversation` (singular) = list of {"role": "user"/"assistant", "content": "..."}.
+    """
     print(f"  [ZH] Loading DISC-Med-SFT (up to {max_samples:,}) ...")
     try:
-        ds = load_dataset("Flmc/DISC-Med-SFT", split="train", trust_remote_code=True)
+        ds = load_dataset("Flmc/DISC-Med-SFT", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -284,13 +272,9 @@ def load_sft_disc_med(max_samples: int = 100_000) -> list:
     for i, row in enumerate(ds):
         if i >= max_samples:
             break
-        raw_convs = row.get("conversations") or []
+        # Field is "conversation" (singular), not "conversations"
+        raw_convs = row.get("conversation") or []
         conversations = _normalize_conversations(raw_convs) if raw_convs else []
-        if not conversations:
-            q = _clean(str(row.get("input") or ""))
-            a = _clean(str(row.get("output") or ""))
-            if q and a:
-                conversations = [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
         if conversations and _has_assistant_content(conversations):
             if all(t.get("content", "").strip() for t in conversations):
                 conversations = _maybe_add_system(conversations)
@@ -300,10 +284,13 @@ def load_sft_disc_med(max_samples: int = 100_000) -> list:
 
 
 def load_sft_chatmed(max_samples: int = 100_000) -> list:
-    """michaelwzhu/ChatMed_Consult_Dataset — real patient-doctor consultations."""
+    """michaelwzhu/ChatMed_Consult_Dataset — real patient-doctor consultations.
+
+    Schema: `query` (patient question), `response` (doctor answer).
+    """
     print(f"  [ZH] Loading ChatMed_Consult_Dataset (up to {max_samples:,}) ...")
     try:
-        ds = load_dataset("michaelwzhu/ChatMed_Consult_Dataset", split="train", trust_remote_code=True)
+        ds = load_dataset("michaelwzhu/ChatMed_Consult_Dataset", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -311,8 +298,8 @@ def load_sft_chatmed(max_samples: int = 100_000) -> list:
     for i, row in enumerate(ds):
         if i >= max_samples:
             break
-        q = _clean(str(row.get("input") or row.get("question") or ""))
-        a = _clean(str(row.get("output") or row.get("answer") or row.get("response") or ""))
+        q = _clean(str(row.get("query") or ""))
+        a = _clean(str(row.get("response") or ""))
         if len(q) >= 5 and len(a) >= 20 and not _is_garbled(a):
             conversations = _maybe_add_system([
                 {"role": "user", "content": q},
@@ -324,22 +311,33 @@ def load_sft_chatmed(max_samples: int = 100_000) -> list:
 
 
 def load_sft_cmtmedqa() -> list:
-    """Suprit/CMtMedQA — high-quality multi-turn Chinese medical QA."""
+    """Suprit/CMtMedQA — high-quality multi-turn Chinese medical QA.
+
+    Schema: `instruction` (current question), `output` (answer),
+    `history` = list of [question_str, answer_str] pairs (prior turns).
+    """
     print("  [ZH] Loading CMtMedQA ...")
     try:
-        ds = load_dataset("Suprit/CMtMedQA", split="train", trust_remote_code=True)
+        ds = load_dataset("Suprit/CMtMedQA", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
     records = []
     for row in ds:
-        raw_convs = row.get("conversations") or []
-        conversations = _normalize_conversations(raw_convs) if raw_convs else []
-        if not conversations:
-            q = _clean(str(row.get("question") or row.get("input") or ""))
-            a = _clean(str(row.get("answer") or row.get("output") or ""))
-            if q and a:
-                conversations = [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
+        conversations = []
+        # Reconstruct multi-turn from history
+        history = row.get("history") or []
+        if isinstance(history, list):
+            for item in history:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    conversations.append({"role": "user",      "content": _clean(str(item[0]))})
+                    conversations.append({"role": "assistant", "content": _clean(str(item[1]))})
+        instruction = _clean(str(row.get("instruction") or ""))
+        output      = _clean(str(row.get("output") or ""))
+        if instruction:
+            conversations.append({"role": "user",      "content": instruction})
+        if output:
+            conversations.append({"role": "assistant", "content": output})
         if conversations and _has_assistant_content(conversations):
             conversations = _maybe_add_system(conversations)
             records.append({"conversations": conversations})
@@ -351,7 +349,7 @@ def load_sft_healthcaremagic() -> list:
     """lavita/ChatDoctor-HealthCareMagic-100k — 100k EN patient-doctor pairs."""
     print("  [EN] Loading ChatDoctor-HealthCareMagic-100k ...")
     try:
-        ds = load_dataset("lavita/ChatDoctor-HealthCareMagic-100k", split="train", trust_remote_code=True)
+        ds = load_dataset("lavita/ChatDoctor-HealthCareMagic-100k", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -373,7 +371,7 @@ def load_sft_medalpaca_mediqa() -> list:
     """medalpaca/medical_meadow_mediqa — clinical NLP Q&A (EN)."""
     print("  [EN] Loading medical_meadow_mediqa ...")
     try:
-        ds = load_dataset("medalpaca/medical_meadow_mediqa", split="train", trust_remote_code=True)
+        ds = load_dataset("medalpaca/medical_meadow_mediqa", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -381,7 +379,7 @@ def load_sft_medalpaca_mediqa() -> list:
     for row in ds:
         q = _clean(str(row.get("input") or ""))
         a = _clean(str(row.get("output") or ""))
-        if len(q) >= 5 and len(a) >= 20:
+        if len(q) >= 5 and len(a) >= 20 and not _is_garbled(a):
             conversations = _maybe_add_system([
                 {"role": "user", "content": q},
                 {"role": "assistant", "content": a},
@@ -395,7 +393,7 @@ def load_sft_medalpaca_health_advice() -> list:
     """medalpaca/medical_meadow_health_advice — EN health advice Q&A."""
     print("  [EN] Loading medical_meadow_health_advice ...")
     try:
-        ds = load_dataset("medalpaca/medical_meadow_health_advice", split="train", trust_remote_code=True)
+        ds = load_dataset("medalpaca/medical_meadow_health_advice", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -403,64 +401,10 @@ def load_sft_medalpaca_health_advice() -> list:
     for row in ds:
         q = _clean(str(row.get("input") or ""))
         a = _clean(str(row.get("output") or ""))
-        if len(q) >= 5 and len(a) >= 20:
+        if len(q) >= 5 and len(a) >= 20 and not _is_garbled(a):
             conversations = _maybe_add_system([
                 {"role": "user", "content": q},
                 {"role": "assistant", "content": a},
-            ])
-            records.append({"conversations": conversations})
-    print(f"    → {len(records):,} entries")
-    return records
-
-
-def load_sft_medqa_usmle() -> list:
-    """bigbio/med_qa — USMLE MCQs converted to conversational format (EN).
-
-    BigBio QA schema:
-      question: str
-      choices:  list of {"key": str, "text": str}
-      answer:   list[str]  (correct answer texts)
-    """
-    print("  [EN] Loading MedQA-USMLE ...")
-    try:
-        ds = load_dataset("bigbio/med_qa", name="med_qa_en_bigbio_qa", split="train", trust_remote_code=True)
-    except Exception as e:
-        print(f"    Skipped: {e}")
-        return []
-    records = []
-    for row in ds:
-        question = _clean(str(row.get("question") or ""))
-        choices = row.get("choices") or []
-        answers = row.get("answer") or []  # list of correct answer strings
-
-        if not question or not answers or not choices:
-            continue
-
-        correct_text = _clean(str(answers[0]))
-
-        # Build options block (A) ... B) ...) and find the matching key
-        option_lines = []
-        key_label = ""
-        for choice in choices:
-            k = str(choice.get("key", ""))
-            t = _clean(str(choice.get("text", "")))
-            if k and t:
-                option_lines.append(f"{k}) {t}")
-            if t == correct_text:
-                key_label = k
-
-        # Embed options into question so the model sees the full MCQ context
-        full_question = question + "\n\n" + "\n".join(option_lines) if option_lines else question
-
-        if key_label:
-            answer_text = f"The correct answer is ({key_label}): {correct_text}"
-        else:
-            answer_text = correct_text
-
-        if full_question and answer_text:
-            conversations = _maybe_add_system([
-                {"role": "user", "content": full_question},
-                {"role": "assistant", "content": answer_text},
             ])
             records.append({"conversations": conversations})
     print(f"    → {len(records):,} entries")
@@ -471,7 +415,7 @@ def load_sft_pubmedqa() -> list:
     """pubmed_qa — PubMed research Q&A (EN)."""
     print("  [EN] Loading PubMedQA ...")
     try:
-        ds = load_dataset("pubmed_qa", "pqa_labeled", split="train", trust_remote_code=True)
+        ds = load_dataset("pubmed_qa", "pqa_labeled", split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -480,7 +424,7 @@ def load_sft_pubmedqa() -> list:
         q = _clean(str(row.get("question") or ""))
         long_ans = _clean(str(row.get("long_answer") or ""))
         yes_no = str(row.get("final_decision") or "")
-        if q and long_ans:
+        if q and long_ans and not _is_garbled(long_ans):
             a = long_ans + (f"\n\nIn summary: {yes_no}." if yes_no else "")
             conversations = _maybe_add_system([
                 {"role": "user", "content": q},
@@ -498,8 +442,7 @@ def load_sft_pubmedqa() -> list:
 def build_pretrain(pubmed_samples: int, huatuo_samples: int) -> None:
     print("\n=== Building pretrain_medical.jsonl ===")
     all_records: list = []
-    all_records += load_pretrain_shibing624_medical()
-    all_records += load_pretrain_huatuo26m(max_samples=huatuo_samples)
+    all_records += load_pretrain_huatuo_gpt_as_text(max_samples=huatuo_samples)
     all_records += load_pretrain_wikidoc()
     all_records += load_pretrain_medrag_textbooks()
     all_records += load_pretrain_pubmed(max_samples=pubmed_samples)

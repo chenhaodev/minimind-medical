@@ -57,13 +57,14 @@ _SHAREGPT_ROLE_MAP = {
 def _is_garbled(text: str) -> bool:
     if not text:
         return True
-    # Only count truly non-printable control chars (excluding \n \t \r which are valid)
-    bad = sum(
-        1 for c in text
-        if c not in ("\n", "\t", "\r")
-        and (unicodedata.category(c) in ("Cc", "Cs") or c == "�")
-    )
-    return bad / len(text) > 0.3
+    limit = len(text) * 0.3
+    bad = 0
+    for c in text:
+        if c not in ("\n", "\t", "\r") and (unicodedata.category(c) in ("Cc", "Cs") or c == ""):
+            bad += 1
+            if bad > limit:
+                return True
+    return False
 
 
 def _clean(text: str) -> str:
@@ -129,11 +130,6 @@ def _has_assistant_content(conversations: list) -> bool:
     )
 
 
-def _strip_prefix(s: str, prefix: str) -> str:
-    s = _clean(str(s))
-    return s[len(prefix):].strip() if s.startswith(prefix) else s
-
-
 def _maybe_add_system(conversations: list, ratio: float = 0.2) -> list:
     if conversations and conversations[0].get("role") == "system":
         return conversations
@@ -182,7 +178,6 @@ def load_pretrain_pubmed(max_samples: int = 50_000) -> list:
     for i, row in enumerate(ds):
         if i >= max_samples:
             break
-        # "abstract" field contains the abstract; "article" is the full paper
         abstract = _clean(str(row.get("abstract") or ""))
         if len(abstract) >= 50 and not _is_garbled(abstract):
             records.append({"text": abstract})
@@ -245,8 +240,8 @@ def load_sft_huatuo_gpt() -> list:
         data = row.get("data") or []
         if not (isinstance(data, list) and len(data) >= 2):
             continue
-        q = _strip_prefix(data[0], "问：")
-        a = _strip_prefix(data[1], "答：")
+        q = _clean(str(data[0])).removeprefix("问：").strip()
+        a = _clean(str(data[1])).removeprefix("答：").strip()
         if len(q) >= 5 and len(a) >= 20 and not _is_garbled(a):
             conversations = _maybe_add_system([
                 {"role": "user", "content": q},
@@ -276,8 +271,7 @@ def load_sft_disc_med(max_samples: int = 100_000) -> list:
         raw_convs = row.get("conversation") or []
         conversations = _normalize_conversations(raw_convs) if raw_convs else []
         if conversations and _has_assistant_content(conversations):
-            if (all(t.get("content", "").strip() for t in conversations)
-                    and not any(_is_garbled(t.get("content", "")) for t in conversations)):
+            if not any(_is_garbled(t.get("content", "")) for t in conversations):
                 conversations = _maybe_add_system(conversations)
                 records.append({"conversations": conversations})
     print(f"    → {len(records):,} entries")
@@ -369,33 +363,11 @@ def load_sft_healthcaremagic() -> list:
     return records
 
 
-def load_sft_medalpaca_mediqa() -> list:
-    """medalpaca/medical_meadow_mediqa — clinical NLP Q&A (EN)."""
-    print("  [EN] Loading medical_meadow_mediqa ...")
+def _load_sft_medalpaca(dataset_id: str, label: str) -> list:
+    """Shared loader for medalpaca input/output datasets."""
+    print(f"  [EN] Loading {label} ...")
     try:
-        ds = load_dataset("medalpaca/medical_meadow_mediqa", split="train")
-    except Exception as e:
-        print(f"    Skipped: {e}")
-        return []
-    records = []
-    for row in ds:
-        q = _clean(str(row.get("input") or ""))
-        a = _clean(str(row.get("output") or ""))
-        if len(q) >= 5 and len(a) >= 20 and not _is_garbled(a):
-            conversations = _maybe_add_system([
-                {"role": "user", "content": q},
-                {"role": "assistant", "content": a},
-            ])
-            records.append({"conversations": conversations})
-    print(f"    → {len(records):,} entries")
-    return records
-
-
-def load_sft_medalpaca_health_advice() -> list:
-    """medalpaca/medical_meadow_health_advice — EN health advice Q&A."""
-    print("  [EN] Loading medical_meadow_health_advice ...")
-    try:
-        ds = load_dataset("medalpaca/medical_meadow_health_advice", split="train")
+        ds = load_dataset(dataset_id, split="train")
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
@@ -466,8 +438,8 @@ def build_sft(disc_samples: int, chatmed_samples: int) -> None:
     all_records += load_sft_disc_med(max_samples=disc_samples)
     all_records += load_sft_chatmed(max_samples=chatmed_samples)
     all_records += load_sft_healthcaremagic()
-    all_records += load_sft_medalpaca_mediqa()
-    all_records += load_sft_medalpaca_health_advice()
+    all_records += _load_sft_medalpaca("medalpaca/medical_meadow_mediqa", "medical_meadow_mediqa")
+    all_records += _load_sft_medalpaca("medalpaca/medical_meadow_health_advice", "medical_meadow_health_advice")
     all_records += load_sft_pubmedqa()
 
     print(f"\nTotal before dedup: {len(all_records):,}")

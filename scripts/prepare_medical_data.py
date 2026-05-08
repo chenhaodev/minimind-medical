@@ -30,7 +30,7 @@ from simhash import Simhash, SimhashIndex
 # Config
 # ---------------------------------------------------------------------------
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "dataset")
+OUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "dataset"))
 
 MEDICAL_SYSTEM_PROMPTS = [
     "你是一位专业的医疗AI助手，请根据医学知识为用户提供准确的健康信息。",
@@ -102,8 +102,7 @@ def _simhash_dedup(records: list, text_fn, threshold: int = 3) -> list:
     for rec in records:
         key = text_fn(rec)
         if not key:
-            out.append(rec)  # keep untextable records as-is
-            continue
+            continue  # drop records with no extractable key — likely malformed
         h = Simhash(key)
         if not index.get_near_dups(h):
             index.add(str(uid), h)
@@ -128,6 +127,11 @@ def _has_assistant_content(conversations: list) -> bool:
         t.get("role") == "assistant" and t.get("content", "").strip()
         for t in conversations
     )
+
+
+def _strip_prefix(s: str, prefix: str) -> str:
+    s = _clean(str(s))
+    return s[len(prefix):].strip() if s.startswith(prefix) else s
 
 
 def _maybe_add_system(conversations: list, ratio: float = 0.2) -> list:
@@ -236,10 +240,6 @@ def load_sft_huatuo_gpt() -> list:
     except Exception as e:
         print(f"    Skipped: {e}")
         return []
-    def _strip_prefix(s, prefix):
-        s = _clean(str(s))
-        return s[len(prefix):].strip() if s.startswith(prefix) else s
-
     records = []
     for row in ds:
         data = row.get("data") or []
@@ -276,7 +276,8 @@ def load_sft_disc_med(max_samples: int = 100_000) -> list:
         raw_convs = row.get("conversation") or []
         conversations = _normalize_conversations(raw_convs) if raw_convs else []
         if conversations and _has_assistant_content(conversations):
-            if all(t.get("content", "").strip() for t in conversations):
+            if (all(t.get("content", "").strip() for t in conversations)
+                    and not any(_is_garbled(t.get("content", "")) for t in conversations)):
                 conversations = _maybe_add_system(conversations)
                 records.append({"conversations": conversations})
     print(f"    → {len(records):,} entries")
@@ -339,8 +340,9 @@ def load_sft_cmtmedqa() -> list:
         if output:
             conversations.append({"role": "assistant", "content": output})
         if conversations and _has_assistant_content(conversations):
-            conversations = _maybe_add_system(conversations)
-            records.append({"conversations": conversations})
+            if not any(_is_garbled(t.get("content", "")) for t in conversations):
+                conversations = _maybe_add_system(conversations)
+                records.append({"conversations": conversations})
     print(f"    → {len(records):,} entries")
     return records
 
@@ -357,7 +359,7 @@ def load_sft_healthcaremagic() -> list:
     for row in ds:
         q = _clean(str(row.get("input") or row.get("question") or ""))
         a = _clean(str(row.get("output") or row.get("answer") or ""))
-        if len(q) >= 5 and len(a) >= 20 and not _is_garbled(a):
+        if len(q) >= 5 and len(a) >= 20 and not _is_garbled(q) and not _is_garbled(a):
             conversations = _maybe_add_system([
                 {"role": "user", "content": q},
                 {"role": "assistant", "content": a},
@@ -423,7 +425,7 @@ def load_sft_pubmedqa() -> list:
     for row in ds:
         q = _clean(str(row.get("question") or ""))
         long_ans = _clean(str(row.get("long_answer") or ""))
-        yes_no = str(row.get("final_decision") or "")
+        yes_no = _clean(str(row.get("final_decision") or ""))
         if q and long_ans and not _is_garbled(long_ans):
             a = long_ans + (f"\n\nIn summary: {yes_no}." if yes_no else "")
             conversations = _maybe_add_system([

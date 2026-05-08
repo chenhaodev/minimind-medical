@@ -72,6 +72,60 @@
 
 ---
 
+# 🏥 MiniMind-Medical
+
+> This fork extends [MiniMind](https://github.com/jingyaogong/minimind) with a bilingual (Chinese + English) medical/healthcare domain training pipeline.
+
+## Medical Domain Quick Start
+
+### 1. Prepare datasets
+
+```bash
+# Full pipeline (~2–5 GB pretrain + ~500k SFT pairs, needs HuggingFace access)
+python scripts/prepare_medical_data.py --stage all
+
+# Lighter run (faster, lower memory)
+python scripts/prepare_medical_data.py --stage all \
+  --pubmed_samples 100000 --huatuo_samples 100000 \
+  --disc_samples 50000 --chatmed_samples 50000
+```
+
+Outputs `dataset/pretrain_medical.jsonl` and `dataset/sft_medical.jsonl`.
+
+**Pretrain sources (ZH + EN):** shibing624/medical · Huatuo-26M · PubMed abstracts · medical_meadow_wikidoc · MedRAG/textbooks
+
+**SFT sources (ZH + EN):** HuatuoGPT-sft-data-v1 · CMtMedQA · DISC-Med-SFT · ChatMed-Consult · ChatDoctor-HealthCareMagic · medalpaca (mediqa + health_advice) · MedQA-USMLE · PubMedQA
+
+### 2. Continue pretrain on medical corpus
+
+```bash
+python trainer/train_pretrain.py \
+  --data_path ../dataset/pretrain_medical.jsonl \
+  --from_weight pretrain \
+  --save_weight pretrain_medical \
+  --learning_rate 1e-4 \
+  --epochs 2
+```
+
+### 3. Full SFT on medical Q&A
+
+```bash
+python trainer/train_full_sft.py \
+  --data_path ../dataset/sft_medical.jsonl \
+  --from_weight pretrain_medical \
+  --save_weight full_sft_medical \
+  --learning_rate 5e-6 \
+  --epochs 3
+```
+
+### 4. Inference
+
+```bash
+python eval_llm.py --weight full_sft_medical
+```
+
+---
+
 # 📌 Project Introduction
 
 The emergence of Large Language Models (LLMs) has drawn unprecedented global attention to AI. ChatGPT, DeepSeek, Qwen, and many other models have impressed people with their remarkable performance, making the impact of this technological wave feel very real. However, models with tens or hundreds of billions of parameters are not only difficult to train on personal devices, but often out of reach even for deployment. Opening the "black box" of large models and truly understanding how they work internally should have been an exciting thing. Unfortunately, most explorations eventually stop at applying techniques such as LoRA to fine-tune existing large models on a few new instructions or specific tasks. This is more like teaching Newton how to use a 21st-century smartphone — interesting, but not quite the original goal of understanding the essence of physics.

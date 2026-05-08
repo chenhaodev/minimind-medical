@@ -24,7 +24,7 @@ __package__ = "scripts"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from datasets import load_dataset
-from simhash import Simhash
+from simhash import Simhash, SimhashIndex
 
 # ---------------------------------------------------------------------------
 # Config
@@ -86,17 +86,20 @@ def _normalize_conversations(conversations: list) -> list:
 
 
 def _simhash_dedup(records: list, text_fn, threshold: int = 3) -> list:
-    """Remove near-duplicates using SimHash with Hamming distance threshold."""
-    seen: list[Simhash] = []
+    """Remove near-duplicates using SimhashIndex for O(n log n) lookup."""
+    # SimhashIndex requires k = number of differing bits tolerated
+    index = SimhashIndex([], k=threshold)
     out = []
+    uid = 0
     for rec in records:
         key = text_fn(rec)
         if not key:
             out.append(rec)  # keep untextable records as-is
             continue
         h = Simhash(key)
-        if all(h.distance(s) > threshold for s in seen):
-            seen.append(h)
+        if not index.get_near_dups(h):
+            index.add(str(uid), h)
+            uid += 1
             out.append(rec)
     return out
 
@@ -109,6 +112,14 @@ def _write_jsonl(path: str, records: list) -> None:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     print(f"  Wrote {len(records):,} records → {path}")
+
+
+def _has_assistant_content(conversations: list) -> bool:
+    """Return True only if at least one assistant turn has non-empty content."""
+    return any(
+        t.get("role") == "assistant" and t.get("content", "").strip()
+        for t in conversations
+    )
 
 
 def _maybe_add_system(conversations: list, ratio: float = 0.2) -> list:
@@ -254,7 +265,7 @@ def load_sft_huatuo_gpt() -> list:
             a = _clean(str(row.get("output") or row.get("answer") or ""))
             if len(q) >= 5 and len(a) >= 20:
                 conversations = [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
-        if conversations:
+        if conversations and _has_assistant_content(conversations):
             conversations = _maybe_add_system(conversations)
             records.append({"conversations": conversations})
     print(f"    → {len(records):,} entries")
@@ -280,8 +291,7 @@ def load_sft_disc_med(max_samples: int = 100_000) -> list:
             a = _clean(str(row.get("output") or ""))
             if q and a:
                 conversations = [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
-        if conversations:
-            # Reject turns with empty content
+        if conversations and _has_assistant_content(conversations):
             if all(t.get("content", "").strip() for t in conversations):
                 conversations = _maybe_add_system(conversations)
                 records.append({"conversations": conversations})
@@ -330,7 +340,7 @@ def load_sft_cmtmedqa() -> list:
             a = _clean(str(row.get("answer") or row.get("output") or ""))
             if q and a:
                 conversations = [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
-        if conversations:
+        if conversations and _has_assistant_content(conversations):
             conversations = _maybe_add_system(conversations)
             records.append({"conversations": conversations})
     print(f"    → {len(records):,} entries")
@@ -423,25 +433,33 @@ def load_sft_medqa_usmle() -> list:
         choices = row.get("choices") or []
         answers = row.get("answer") or []  # list of correct answer strings
 
-        if not question or not answers:
+        if not question or not answers or not choices:
             continue
 
         correct_text = _clean(str(answers[0]))
-        # Find the choice key that matches the correct answer text
+
+        # Build options block (A) ... B) ...) and find the matching key
+        option_lines = []
         key_label = ""
         for choice in choices:
-            if _clean(str(choice.get("text", ""))) == correct_text:
-                key_label = str(choice.get("key", ""))
-                break
+            k = str(choice.get("key", ""))
+            t = _clean(str(choice.get("text", "")))
+            if k and t:
+                option_lines.append(f"{k}) {t}")
+            if t == correct_text:
+                key_label = k
+
+        # Embed options into question so the model sees the full MCQ context
+        full_question = question + "\n\n" + "\n".join(option_lines) if option_lines else question
 
         if key_label:
             answer_text = f"The correct answer is ({key_label}): {correct_text}"
         else:
             answer_text = correct_text
 
-        if question and answer_text:
+        if full_question and answer_text:
             conversations = _maybe_add_system([
-                {"role": "user", "content": question},
+                {"role": "user", "content": full_question},
                 {"role": "assistant", "content": answer_text},
             ])
             records.append({"conversations": conversations})

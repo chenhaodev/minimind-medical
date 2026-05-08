@@ -104,7 +104,7 @@ python trainer/train_pretrain.py \
   --from_weight pretrain \
   --save_weight pretrain_medical \
   --learning_rate 1e-4 \
-  --epochs 2
+  --epochs 1
 ```
 
 ### 3. Full SFT on medical Q&A
@@ -115,7 +115,7 @@ python trainer/train_full_sft.py \
   --from_weight pretrain_medical \
   --save_weight full_sft_medical \
   --learning_rate 5e-6 \
-  --epochs 3
+  --epochs 1
 ```
 
 ### 4. Inference

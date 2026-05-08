@@ -9,7 +9,7 @@ Usage:
   python scripts/prepare_medical_data.py --stage all
   python scripts/prepare_medical_data.py --stage pretrain
   python scripts/prepare_medical_data.py --stage sft
-  python scripts/prepare_medical_data.py --stage all --pubmed_samples 500000
+  python scripts/prepare_medical_data.py --stage all --pubmed_samples 50000
 """
 
 import argparse
@@ -523,7 +523,6 @@ def build_sft(disc_samples: int, chatmed_samples: int) -> None:
     all_records += load_sft_healthcaremagic()
     all_records += load_sft_medalpaca_mediqa()
     all_records += load_sft_medalpaca_health_advice()
-    all_records += load_sft_medqa_usmle()
     all_records += load_sft_pubmedqa()
 
     print(f"\nTotal before dedup: {len(all_records):,}")
@@ -561,14 +560,14 @@ def validate(path: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare bilingual medical datasets for MiniMind")
     parser.add_argument("--stage", choices=["pretrain", "sft", "all"], default="all")
-    parser.add_argument("--pubmed_samples", type=int, default=500_000,
-                        help="Max PubMed abstracts to include (default: 500000)")
-    parser.add_argument("--huatuo_samples", type=int, default=300_000,
-                        help="Max Huatuo-26M entries to include (default: 300000)")
-    parser.add_argument("--disc_samples", type=int, default=100_000,
-                        help="Max DISC-Med-SFT entries (default: 100000)")
-    parser.add_argument("--chatmed_samples", type=int, default=100_000,
-                        help="Max ChatMed entries (default: 100000)")
+    parser.add_argument("--pubmed_samples", type=int, default=50_000,
+                        help="Max PubMed abstracts to include (default: 50000 mini; use 500000 for full)")
+    parser.add_argument("--huatuo_samples", type=int, default=50_000,
+                        help="Max Huatuo-26M entries to include (default: 50000 mini; use 300000 for full)")
+    parser.add_argument("--disc_samples", type=int, default=20_000,
+                        help="Max DISC-Med-SFT entries (default: 20000 mini; use 100000 for full)")
+    parser.add_argument("--chatmed_samples", type=int, default=20_000,
+                        help="Max ChatMed entries (default: 20000 mini; use 100000 for full)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -587,6 +586,6 @@ if __name__ == "__main__":
             validate(sft_path)
 
     print("\nDone. Next steps:")
-    print("  1. python trainer/train_pretrain.py --data_path ../dataset/pretrain_medical.jsonl --from_weight pretrain --save_weight pretrain_medical --learning_rate 1e-4")
-    print("  2. python trainer/train_full_sft.py  --data_path ../dataset/sft_medical.jsonl    --from_weight pretrain_medical --save_weight full_sft_medical --learning_rate 5e-6")
+    print("  1. python trainer/train_pretrain.py --data_path ../dataset/pretrain_medical.jsonl --from_weight pretrain --save_weight pretrain_medical --learning_rate 1e-4 --epochs 1")
+    print("  2. python trainer/train_full_sft.py  --data_path ../dataset/sft_medical.jsonl    --from_weight pretrain_medical --save_weight full_sft_medical --learning_rate 5e-6 --epochs 1")
     print("  3. python eval_llm.py --weight full_sft_medical")

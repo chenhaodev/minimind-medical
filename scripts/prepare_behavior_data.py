@@ -191,16 +191,18 @@ def build_intent_tagger_data(
     print(f"  Loading BelleGroup/train_0.5M_CN (streaming, sample {belle_samples:,}) ...")
     belle_stream = load_dataset("BelleGroup/train_0.5M_CN", split="train", streaming=True)
     reservoir = []
-    for i, row in enumerate(belle_stream):
+    valid_count = 0
+    for row in belle_stream:
         instr = _clean(row.get("instruction", "") or "")
         if len(instr) < 10:
             continue
         if len(reservoir) < belle_samples:
             reservoir.append(instr)
         else:
-            j = rng.randint(0, i)
+            j = rng.randint(0, valid_count)
             if j < belle_samples:
                 reservoir[j] = instr
+        valid_count += 1
     belle_start = len(records)
     for instr in reservoir:
         task_type, style, ref = _classify(instr, _ZH_CLASSIFY_RULES, _ZH_REF_RE)

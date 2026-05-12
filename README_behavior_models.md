@@ -74,7 +74,8 @@ python trainer/train_full_sft.py \
   --epochs 5 \
   --batch_size 32 \
   --learning_rate 2e-5 \
-  --max_seq_len 256
+  --max_seq_len 256 \
+  --empty_think_ratio 0
 ```
 
 Output checkpoint: `out/intent_tagger_768.pth`
@@ -93,7 +94,8 @@ python trainer/train_full_sft.py \
   --epochs 3 \
   --batch_size 16 \
   --learning_rate 1e-5 \
-  --max_seq_len 512
+  --max_seq_len 512 \
+  --empty_think_ratio 0
 ```
 
 Output checkpoint: `out/prompt_augmenter_768.pth`

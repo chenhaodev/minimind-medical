@@ -341,9 +341,9 @@ def main():
 
     print("\nDone. Run training next:")
     print("  python trainer/train_full_sft.py --data_path dataset/sft_intent_tagger.jsonl "
-          "--from_weight pretrain --save_weight intent_tagger --epochs 5 --max_seq_len 256")
+          "--from_weight pretrain --save_weight intent_tagger --epochs 5 --max_seq_len 256 --empty_think_ratio 0")
     print("  python trainer/train_full_sft.py --data_path dataset/sft_prompt_augmenter.jsonl "
-          "--from_weight pretrain --save_weight prompt_augmenter --epochs 3 --max_seq_len 512")
+          "--from_weight pretrain --save_weight prompt_augmenter --epochs 3 --max_seq_len 512 --empty_think_ratio 0")
 
 
 if __name__ == "__main__":

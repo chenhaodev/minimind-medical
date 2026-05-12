@@ -56,7 +56,7 @@ class PretrainDataset(Dataset):
 
 
 class SFTDataset(Dataset):
-    def __init__(self, jsonl_path, tokenizer, max_length=1024):
+    def __init__(self, jsonl_path, tokenizer, max_length=1024, empty_think_ratio=0.2):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -64,6 +64,7 @@ class SFTDataset(Dataset):
         self.samples = load_dataset('json', data_files=jsonl_path, split='train', features=features)
         self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
         self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
+        self.empty_think_ratio = empty_think_ratio
 
     def __len__(self):
         return len(self.samples)
@@ -107,7 +108,7 @@ class SFTDataset(Dataset):
         sample = self.samples[index]
         conversations = pre_processing_chat(sample['conversations'])
         prompt = self.create_chat_prompt(conversations)
-        prompt = post_processing_chat(prompt)
+        prompt = post_processing_chat(prompt, self.empty_think_ratio)
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
         input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
         labels = self.generate_labels(input_ids)

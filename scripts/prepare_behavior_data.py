@@ -145,32 +145,17 @@ def _preview(name: str, records: list, n: int = 3) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Model A: Intent Tagger dataset
+# Build tag metadata: (query, task_type, style, ref) tuples
 # ---------------------------------------------------------------------------
 
-def build_intent_tagger_data(
+def build_tag_meta(
     belle_samples: int,
     medical_queries: list,
     medical_samples: int,
     seed: int,
-) -> tuple:
-    """Returns (sft_records, tag_meta).
-
-    tag_meta is a list of (query, task_type, style, ref) tuples passed to the
-    augmenter builder so it can derive style prompts without re-parsing strings.
-    """
+) -> list:
     rng = random.Random(seed)
-    records = []
-    tag_meta = []  # (query, task_type, style, ref)
-
-    def _add(query: str, task_type: str, style: str, ref: str) -> None:
-        records.append({
-            "conversations": [
-                {"role": "user", "content": query},
-                {"role": "assistant", "content": _make_tag(task_type, style, ref)},
-            ]
-        })
-        tag_meta.append((query, task_type, style, ref))
+    tag_meta = []
 
     # Source 1: databricks/databricks-dolly-15k
     print("  Loading databricks/databricks-dolly-15k ...")
@@ -183,8 +168,8 @@ def build_intent_tagger_data(
             continue
         task_type, style, ref = DOLLY_TAG_MAP[category]
         query = f"{instruction}\n\n{context}" if context else instruction
-        _add(query, task_type, style, ref)
-    print(f"  Dolly: {len(records):,} examples")
+        tag_meta.append((query, task_type, style, ref))
+    print(f"  Dolly: {len(tag_meta):,} examples")
 
     # Source 2: BelleGroup/train_0.5M_CN (reservoir sampling — O(belle_samples) memory)
     print(f"  Loading BelleGroup/train_0.5M_CN (streaming, sample {belle_samples:,}) ...")
@@ -202,25 +187,20 @@ def build_intent_tagger_data(
             if j < belle_samples:
                 reservoir[j] = instr
         valid_count += 1
-    belle_start = len(records)
+    belle_start = len(tag_meta)
     for instr in reservoir:
         task_type, style, ref = _classify(instr, _ZH_CLASSIFY_RULES, _ZH_REF_RE)
-        _add(instr, task_type, style, ref)
-    print(f"  BelleGroup: {len(records) - belle_start:,} examples")
+        tag_meta.append((instr, task_type, style, ref))
+    print(f"  BelleGroup: {len(tag_meta) - belle_start:,} examples")
 
     # Source 3: pre-loaded medical queries (ref:yes bucket)
-    med_start = len(records)
+    med_start = len(tag_meta)
     for q in medical_queries[:medical_samples]:
-        _add(q, "explanation", "detailed", "yes")
-    print(f"  Medical: {len(records) - med_start:,} examples (ref:yes)")
+        tag_meta.append((q, "explanation", "detailed", "yes"))
+    print(f"  Medical: {len(tag_meta) - med_start:,} examples (ref:yes)")
 
-    # Shuffle records and tag_meta together
-    indices = list(range(len(records)))
-    rng.shuffle(indices)
-    records = [records[i] for i in indices]
-    tag_meta = [tag_meta[i] for i in indices]
-
-    return records, tag_meta
+    rng.shuffle(tag_meta)
+    return tag_meta
 
 
 # ---------------------------------------------------------------------------
@@ -232,11 +212,10 @@ def build_combined_data(
     orca_samples: int,
     seed: int,
 ) -> list:
-    """Each sample: user=raw query, assistant='{tag}\\n\\n{system_prompt}'."""
     rng = random.Random(seed)
     records = []
 
-    # Source 1: Dolly + Belle + Medical via tag_meta (no re-parsing needed)
+    # Source 1: Dolly + Belle + Medical
     for query, task_type, style, ref in tag_meta:
         tag = _make_tag(task_type, style, ref)
         system_prompt = _make_style_prompt(task_type, style, ref)
@@ -252,9 +231,13 @@ def build_combined_data(
     orca_stream = load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
     orca_added = 0
     for row in orca_stream:
-        sys_prompt = _clean(row.get("system_prompt", "") or "")
-        question = _clean(row.get("question", "") or "")
-        if not question or not sys_prompt or not _ORCA_STYLE_RE.search(sys_prompt):
+        raw_sys = row.get("system_prompt", "") or ""
+        raw_q = row.get("question", "") or ""
+        if not raw_sys or not raw_q:
+            continue
+        sys_prompt = _clean(raw_sys)
+        question = _clean(raw_q)
+        if not _ORCA_STYLE_RE.search(sys_prompt):
             continue
         task_type, style, ref = _classify(question, _EN_CLASSIFY_RULES, _EN_REF_RE)
         tag = _make_tag(task_type, style, ref)
@@ -290,10 +273,8 @@ def main():
                         help="Preview samples to print per dataset (default: 3)")
     args = parser.parse_args()
 
-    random.seed(args.seed)
     rng = random.Random(args.seed)
 
-    # Load medical queries once; reused by both builders
     medical_queries = []
     medical_path = os.path.join(OUT_DIR, "sft_medical.jsonl")
     if os.path.exists(medical_path):
@@ -304,7 +285,7 @@ def main():
         print("sft_medical.jsonl not found — skipping medical source")
 
     print("\n=== Building tag_meta (query → tags) ===")
-    _, tag_meta = build_intent_tagger_data(
+    tag_meta = build_tag_meta(
         belle_samples=args.belle_samples,
         medical_queries=medical_queries,
         medical_samples=args.medical_samples,

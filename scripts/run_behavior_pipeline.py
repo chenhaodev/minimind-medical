@@ -54,7 +54,6 @@ def _generate(model, tokenizer, prompt: str, device: str, max_new_tokens: int = 
         **inputs,
         max_new_tokens=max_new_tokens,
         do_sample=False,
-        temperature=1.0,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
     )
@@ -63,7 +62,6 @@ def _generate(model, tokenizer, prompt: str, device: str, max_new_tokens: int = 
 
 
 def _parse_output(raw: str) -> tuple[str, str]:
-    """Split 'tags\\n\\nsystem_prompt' into (tags, system_prompt)."""
     parts = raw.split("\n\n", 1)
     if len(parts) == 2:
         return parts[0].strip(), parts[1].strip()
@@ -74,6 +72,13 @@ def run_pipeline(query: str, model, tokenizer, device: str) -> dict:
     raw = _generate(model, tokenizer, query, device)
     tags, system_prompt = _parse_output(raw)
     return {"query": query, "tags": tags, "system_prompt": system_prompt}
+
+
+def _show(result: dict) -> None:
+    print(f"Query      : {result['query']}")
+    print(f"Tags       : {result['tags']}")
+    print(f"SysPrompt  : {result['system_prompt']}")
+    print()
 
 
 def main():
@@ -97,12 +102,6 @@ def main():
         args.weight, save_dir, args.hidden_size, args.num_hidden_layers, args.device
     )
     print("Model ready.\n")
-
-    def _show(result: dict) -> None:
-        print(f"Query      : {result['query']}")
-        print(f"Tags       : {result['tags']}")
-        print(f"SysPrompt  : {result['system_prompt']}")
-        print()
 
     if args.query:
         _show(run_pipeline(args.query, model, tokenizer, args.device))

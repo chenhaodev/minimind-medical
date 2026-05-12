@@ -54,7 +54,7 @@ _ZH_CLASSIFY_RULES = [
     ("creative",    "detailed", re.compile(r"写一|写个|帮我写|创作|生成一|写一篇|续写|改编|改写|扩写")),
     ("plan",        "detailed", re.compile(r"如何|怎么|怎样|步骤|方法|流程|怎么做|给定.*将|对以下|根据.*生成|将其")),
 ]
-_ZH_REF_RE = re.compile(r"医|药|病|症|健康|法律|法规|政策|科学|研究|论文")
+_ZH_REF_RE = re.compile(r"医学|医疗|医院|药物|药品|用药|疾病|病症|病理|症状|健康|法律|法规|政策|科研|研究|论文")
 
 _EN_CLASSIFY_RULES = [
     ("judgment",    "brief",    re.compile(r"\bshould\b|is it\b|can i\b|do i need\b", re.I)),
@@ -79,6 +79,9 @@ _ORCA_GENERIC_RE = re.compile(
     r"^you are an? (ai |helpful )?(assistant|chatbot|language model)",
     re.I,
 )
+# Detect verbosity mismatch between inferred style tag and actual Orca system prompt
+_ORCA_VERBOSE_RE = re.compile(r"\b(comprehensive|detailed|thorough|extensive|in-depth)\b", re.I)
+_ORCA_BRIEF_RE = re.compile(r"\b(concise|brief|one sentence|1-2 sentences?|short answer)\b", re.I)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,6 +91,15 @@ def _clean(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _truncate(text: str, max_chars: int = 350) -> str:
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    # break at last whitespace to avoid splitting mid-word
+    boundary = cut.rfind(" ")
+    return (cut[:boundary] if boundary > max_chars // 2 else cut) + "…"
 
 
 def _write_jsonl(path: str, records: list) -> None:
@@ -163,9 +175,19 @@ def build_tag_meta(
     medical_queries: list,
     medical_samples: int,
     seed: int,
-) -> list:
+) -> tuple[list, set]:
+    """Returns (tag_meta, seen_keys) where seen_keys is reused by build_combined_data."""
     rng = random.Random(seed)
     tag_meta = []
+    seen_keys: set[str] = set()
+
+    def _add(query: str, task_type: str, style: str, ref: str) -> None:
+        query = _truncate(query)
+        key = query[:100]
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        tag_meta.append((query, task_type, style, ref))
 
     # Source 1: databricks/databricks-dolly-15k
     print("  Loading databricks/databricks-dolly-15k ...")
@@ -177,8 +199,9 @@ def build_tag_meta(
         if not instruction or category not in DOLLY_TAG_MAP:
             continue
         task_type, style, ref = DOLLY_TAG_MAP[category]
-        query = f"{instruction}\n\n{context}" if context else instruction
-        tag_meta.append((query, task_type, style, ref))
+        # truncate context only, keep full instruction
+        query = f"{instruction}\n\n{_truncate(context, 150)}" if context else instruction
+        _add(query, task_type, style, ref)
     print(f"  Dolly: {len(tag_meta):,} examples")
 
     # Source 2: BelleGroup/train_0.5M_CN (reservoir sampling — O(belle_samples) memory)
@@ -200,17 +223,17 @@ def build_tag_meta(
     belle_start = len(tag_meta)
     for instr in reservoir:
         task_type, style, ref = _classify(instr, _ZH_CLASSIFY_RULES, _ZH_REF_RE)
-        tag_meta.append((instr, task_type, style, ref))
+        _add(instr, task_type, style, ref)
     print(f"  BelleGroup: {len(tag_meta) - belle_start:,} examples")
 
     # Source 3: pre-loaded medical queries (ref:yes bucket)
     med_start = len(tag_meta)
     for q in medical_queries[:medical_samples]:
-        tag_meta.append((q, "explanation", "detailed", "yes"))
+        _add(q, "explanation", "detailed", "yes")
     print(f"  Medical: {len(tag_meta) - med_start:,} examples (ref:yes)")
 
     rng.shuffle(tag_meta)
-    return tag_meta
+    return tag_meta, seen_keys
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +244,7 @@ def build_combined_data(
     tag_meta: list,
     orca_samples: int,
     seed: int,
+    seen_keys: set,
 ) -> list:
     rng = random.Random(seed)
     records = []
@@ -246,10 +270,19 @@ def build_combined_data(
         if not raw_sys or not raw_q:
             continue
         sys_prompt = _clean(raw_sys)
-        question = _clean(raw_q)
+        question = _truncate(_clean(raw_q))
         if not _ORCA_STYLE_RE.search(sys_prompt) or _ORCA_GENERIC_RE.match(sys_prompt):
             continue
+        key = question[:100]
+        if key in seen_keys:
+            continue
         task_type, style, ref = _classify(question, _EN_CLASSIFY_RULES, _EN_REF_RE)
+        # skip records where inferred style contradicts the actual system prompt
+        if style == "brief" and _ORCA_VERBOSE_RE.search(sys_prompt):
+            continue
+        if style == "detailed" and _ORCA_BRIEF_RE.search(sys_prompt):
+            continue
+        seen_keys.add(key)
         tag = _make_tag(task_type, style, ref)
         records.append({
             "conversations": [
@@ -295,7 +328,7 @@ def main():
         print("sft_medical.jsonl not found — skipping medical source")
 
     print("\n=== Building tag_meta (query → tags) ===")
-    tag_meta = build_tag_meta(
+    tag_meta, seen_keys = build_tag_meta(
         belle_samples=args.belle_samples,
         medical_queries=medical_queries,
         medical_samples=args.medical_samples,
@@ -307,6 +340,7 @@ def main():
         tag_meta=tag_meta,
         orca_samples=args.orca_samples,
         seed=args.seed,
+        seen_keys=seen_keys,
     )
     combined_path = os.path.join(OUT_DIR, "sft_behavior_combined.jsonl")
     _write_jsonl(combined_path, combined_records)

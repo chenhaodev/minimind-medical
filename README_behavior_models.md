@@ -21,7 +21,7 @@ Neither model needs domain knowledge — they only learn structural patterns —
 | Source | Dataset | Records | Transform |
 |--------|---------|---------|-----------|
 | EN | [databricks/databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | ~15k | Map 8 categories → intent tag string |
-| ZH | [BelleGroup/train_0.5M_CN](https://huggingface.co/datasets/BelleGroup/train_0.5M_CN) | ~10k (sampled) | Keyword heuristic tagging |
+| ZH | [BelleGroup/train_0.5M_CN](https://huggingface.co/datasets/BelleGroup/train_0.5M_CN) | ~50k (sampled) | Keyword heuristic tagging |
 | ZH | `dataset/sft_medical.jsonl` (local) | ~2k (sampled) | Fixed tag `type:explanation \| style:detailed \| ref:yes` |
 
 Tag format: `type:{X} | style:{Y} | ref:{Z}`
@@ -36,8 +36,8 @@ Tag format: `type:{X} | style:{Y} | ref:{Z}`
 
 | Source | Dataset | Records | Transform |
 |--------|---------|---------|-----------|
-| EN/ZH | Derived from intent tagger data | ~27k | Rule-generate style prompt from tag |
-| EN | [Open-Orca/OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca) | ~5k (filtered) | Filter system prompts with style directives |
+| EN/ZH | Derived from intent tagger data | ~67k | Rule-generate style prompt from tag |
+| EN | [Open-Orca/OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca) | ~20k (filtered) | Filter system prompts with style directives |
 | ZH | `dataset/sft_medical.jsonl` (local) | ~2k (sampled) | Reference-requiring system prompt |
 
 ---
@@ -52,9 +52,9 @@ Key flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--belle_samples` | 10000 | BelleGroup ZH examples for the tagger |
+| `--belle_samples` | 50000 | BelleGroup ZH examples for the tagger |
 | `--medical_samples` | 2000 | Medical examples per dataset |
-| `--orca_samples` | 5000 | OpenOrca examples for the augmenter |
+| `--orca_samples` | 20000 | OpenOrca examples for the augmenter |
 | `--seed` | 42 | Random seed for reproducibility |
 | `--preview_n` | 3 | Samples to print per dataset |
 
@@ -71,7 +71,7 @@ python trainer/train_full_sft.py \
   --data_path dataset/sft_intent_tagger.jsonl \
   --from_weight pretrain \
   --save_weight intent_tagger \
-  --epochs 5 \
+  --epochs 3 \
   --batch_size 32 \
   --learning_rate 2e-5 \
   --max_seq_len 256 \

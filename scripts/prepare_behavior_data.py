@@ -294,12 +294,12 @@ def build_prompt_augmenter_data(
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare User Behavior Theory SFT datasets")
-    parser.add_argument("--belle_samples", type=int, default=10000,
-                        help="Max BelleGroup ZH examples for intent tagger (default: 10000)")
+    parser.add_argument("--belle_samples", type=int, default=50000,
+                        help="Max BelleGroup ZH examples for intent tagger (default: 50000)")
     parser.add_argument("--medical_samples", type=int, default=2000,
                         help="Max medical examples per dataset (default: 2000)")
-    parser.add_argument("--orca_samples", type=int, default=5000,
-                        help="Max OpenOrca examples for prompt augmenter (default: 5000)")
+    parser.add_argument("--orca_samples", type=int, default=20000,
+                        help="Max OpenOrca examples for prompt augmenter (default: 20000)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--preview_n", type=int, default=3,
                         help="Preview samples to print per dataset (default: 3)")

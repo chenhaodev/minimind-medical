@@ -51,23 +51,32 @@ _STYLE_PROMPTS = {
 _ZH_CLASSIFY_RULES = [
     ("judgment",    "brief",    re.compile(r"应该|需不需要|要不要|该不该|是否|能不能|可以吗|对吗|好吗|可行")),
     ("explanation", "detailed", re.compile(r"为什么|是什么|什么是|解释|说明|介绍|如何理解")),
-    ("creative",    "detailed", re.compile(r"写一|写个|帮我写|创作|生成一|写一篇")),
-    ("plan",        "detailed", re.compile(r"如何|怎么|怎样|步骤|方法|流程|怎么做")),
+    ("creative",    "detailed", re.compile(r"写一|写个|帮我写|创作|生成一|写一篇|续写|改编|改写|扩写")),
+    ("plan",        "detailed", re.compile(r"如何|怎么|怎样|步骤|方法|流程|怎么做|给定.*将|对以下|根据.*生成|将其")),
 ]
 _ZH_REF_RE = re.compile(r"医|药|病|症|健康|法律|法规|政策|科学|研究|论文")
 
 _EN_CLASSIFY_RULES = [
     ("judgment",    "brief",    re.compile(r"\bshould\b|is it\b|can i\b|do i need\b", re.I)),
     ("explanation", "detailed", re.compile(r"\bwhy\b|\bexplain\b|what is\b|\bdescribe\b", re.I)),
-    ("creative",    "detailed", re.compile(r"\bwrite\b|\bcreate\b|\bgenerate\b|\bcompose\b", re.I)),
-    ("plan",        "detailed", re.compile(r"how to\b|how do\b|\bsteps\b|\bguide\b", re.I)),
+    # match write/writing/written, create/creating, generate/generating, continue writing, etc.
+    ("creative",    "detailed", re.compile(r"\bwrit\w*\b|\bcreate?\w*\b|\bgenerate?\w*\b|\bcompose?\w*\b|\bcontinue\b|\brewrite\b|\bsummariz\w*\b", re.I)),
+    ("plan",        "detailed", re.compile(r"how to\b|how do\b|\bsteps\b|\bguide\b|\bgiven\b.*\b(convert|replace|transform|modify|find|extract)\b", re.I)),
 ]
 _EN_REF_RE = re.compile(r"\bmedical\b|\bresearch\b|\bstudy\b|\bevidence\b|\blegal\b|\bscientific\b", re.I)
 
-# Regex to detect style-directive language in OpenOrca system prompts
+# Matches style-directive Orca prompts; excludes generic "You are an AI assistant" boilerplate
+# by requiring the directive word to appear outside of a generic opener
 _ORCA_STYLE_RE = re.compile(
-    r"brief|concise|detailed|step.by.step|reference|cite|evidence|comprehensive|"
-    r"简洁|详细|步骤|参考|引用|详尽",
+    r"\b(brief|concise|step.by.step|comprehensive)\b|"
+    r"\b(reference|cite|evidence-based)\b|"
+    r"in (\d+ sentences?|bullet points?|numbered steps?)|"
+    r"简洁|步骤|参考|引用|详尽",
+    re.I,
+)
+# Generic Orca opener — skip prompts that are only this with no real style directive
+_ORCA_GENERIC_RE = re.compile(
+    r"^you are an? (ai |helpful )?(assistant|chatbot|language model)",
     re.I,
 )
 
@@ -109,7 +118,8 @@ def _classify(text: str, rules: list, ref_re) -> tuple:
         if pattern.search(text):
             break
     else:
-        task_type, style = "fact", "brief"
+        # unmatched instructions are typically task-following → treat as plan/detailed
+        task_type, style = "plan", "detailed"
     ref = "yes" if ref_re.search(text) else "no"
     return task_type, style, ref
 
@@ -237,7 +247,7 @@ def build_combined_data(
             continue
         sys_prompt = _clean(raw_sys)
         question = _clean(raw_q)
-        if not _ORCA_STYLE_RE.search(sys_prompt):
+        if not _ORCA_STYLE_RE.search(sys_prompt) or _ORCA_GENERIC_RE.match(sys_prompt):
             continue
         task_type, style, ref = _classify(question, _EN_CLASSIFY_RULES, _EN_REF_RE)
         tag = _make_tag(task_type, style, ref)

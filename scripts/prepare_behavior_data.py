@@ -2,8 +2,7 @@
 User Behavior Theory SFT dataset preparation for MiniMind.
 
 Outputs:
-  dataset/sft_intent_tagger.jsonl     - Model A training data (query → intent tags)
-  dataset/sft_prompt_augmenter.jsonl  - Model B training data (query+tags → system prompt)
+  dataset/sft_behavior_combined.jsonl - Single model training data (query → tags + system prompt)
 
 Usage:
   python scripts/prepare_behavior_data.py
@@ -225,36 +224,35 @@ def build_intent_tagger_data(
 
 
 # ---------------------------------------------------------------------------
-# Model B: Prompt Augmenter dataset
+# Combined: single model — query → tags + system prompt
 # ---------------------------------------------------------------------------
 
-def build_prompt_augmenter_data(
+def build_combined_data(
     tag_meta: list,
     orca_samples: int,
-    medical_queries: list,
-    medical_samples: int,
     seed: int,
 ) -> list:
+    """Each sample: user=raw query, assistant='{tag}\\n\\n{system_prompt}'."""
     rng = random.Random(seed)
     records = []
 
-    # Source 1: derive from tagger tag_meta (structured tuples — no string parsing needed)
+    # Source 1: Dolly + Belle + Medical via tag_meta (no re-parsing needed)
     for query, task_type, style, ref in tag_meta:
         tag = _make_tag(task_type, style, ref)
-        style_prompt = _make_style_prompt(task_type, style, ref)
+        system_prompt = _make_style_prompt(task_type, style, ref)
         records.append({
             "conversations": [
-                {"role": "user", "content": f"Query: {query}\nTags: {tag}"},
-                {"role": "assistant", "content": f"System: {style_prompt}\nQuery: {query}"},
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": f"{tag}\n\n{system_prompt}"},
             ]
         })
 
-    # Source 2: Open-Orca/OpenOrca — filter for style-directive system prompts
+    # Source 2: Open-Orca/OpenOrca — use real system prompts, infer tags from query
     print(f"  Loading Open-Orca/OpenOrca (streaming, target {orca_samples:,}) ...")
     orca_stream = load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
     orca_added = 0
     for row in orca_stream:
-        sys_prompt = row.get("system_prompt", "") or ""
+        sys_prompt = _clean(row.get("system_prompt", "") or "")
         question = _clean(row.get("question", "") or "")
         if not question or not sys_prompt or not _ORCA_STYLE_RE.search(sys_prompt):
             continue
@@ -262,27 +260,14 @@ def build_prompt_augmenter_data(
         tag = _make_tag(task_type, style, ref)
         records.append({
             "conversations": [
-                {"role": "user", "content": f"Query: {question}\nTags: {tag}"},
-                {"role": "assistant", "content": f"System: {_clean(sys_prompt)}\nQuery: {question}"},
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": f"{tag}\n\n{sys_prompt}"},
             ]
         })
         orca_added += 1
         if orca_added >= orca_samples:
             break
-    print(f"  OpenOrca: {orca_added:,} examples with style prompts")
-
-    # Source 3: medical queries with reference-requiring system prompt
-    ref_prompt = _STYLE_PROMPTS["ref"]
-    med_tag = _make_tag("explanation", "detailed", "yes")
-    med_start = len(records)
-    for q in medical_queries[:medical_samples]:
-        records.append({
-            "conversations": [
-                {"role": "user", "content": f"Query: {q}\nTags: {med_tag}"},
-                {"role": "assistant", "content": f"System: {ref_prompt}\nQuery: {q}"},
-            ]
-        })
-    print(f"  Medical augmenter: {len(records) - med_start:,} examples (ref:yes)")
+    print(f"  OpenOrca: {orca_added:,} examples")
 
     rng.shuffle(records)
     return records
@@ -318,34 +303,28 @@ def main():
     else:
         print("sft_medical.jsonl not found — skipping medical source")
 
-    print("\n=== Building Intent Tagger dataset (Model A) ===")
-    tagger_records, tag_meta = build_intent_tagger_data(
+    print("\n=== Building tag_meta (query → tags) ===")
+    _, tag_meta = build_intent_tagger_data(
         belle_samples=args.belle_samples,
         medical_queries=medical_queries,
         medical_samples=args.medical_samples,
         seed=args.seed,
     )
-    tagger_path = os.path.join(OUT_DIR, "sft_intent_tagger.jsonl")
-    _write_jsonl(tagger_path, tagger_records)
-    _preview("Intent Tagger", tagger_records, args.preview_n)
 
-    print("\n=== Building Prompt Augmenter dataset (Model B) ===")
-    augmenter_records = build_prompt_augmenter_data(
+    print("\n=== Building Combined dataset (query → tags + system prompt) ===")
+    combined_records = build_combined_data(
         tag_meta=tag_meta,
         orca_samples=args.orca_samples,
-        medical_queries=medical_queries,
-        medical_samples=args.medical_samples,
         seed=args.seed,
     )
-    augmenter_path = os.path.join(OUT_DIR, "sft_prompt_augmenter.jsonl")
-    _write_jsonl(augmenter_path, augmenter_records)
-    _preview("Prompt Augmenter", augmenter_records, args.preview_n)
+    combined_path = os.path.join(OUT_DIR, "sft_behavior_combined.jsonl")
+    _write_jsonl(combined_path, combined_records)
+    _preview("Combined", combined_records, args.preview_n)
 
     print("\nDone. Run training next:")
-    print("  python trainer/train_full_sft.py --data_path dataset/sft_intent_tagger.jsonl "
-          "--from_weight pretrain --save_weight intent_tagger --epochs 5 --max_seq_len 256 --empty_think_ratio 0")
-    print("  python trainer/train_full_sft.py --data_path dataset/sft_prompt_augmenter.jsonl "
-          "--from_weight pretrain --save_weight prompt_augmenter --epochs 3 --max_seq_len 512 --empty_think_ratio 0")
+    print("  python trainer/train_full_sft.py --data_path dataset/sft_behavior_combined.jsonl "
+          "--from_weight pretrain --save_weight behavior_model --epochs 3 --batch_size 32 "
+          "--learning_rate 2e-5 --max_seq_len 512 --empty_think_ratio 0")
 
 
 if __name__ == "__main__":

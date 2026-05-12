@@ -40,7 +40,6 @@ DOLLY_TAG_MAP = {
     "free_form":              ("explanation", "detailed", "no"),
 }
 
-# Style prompt templates used by Model B output
 _STYLE_PROMPTS = {
     "brief":    "Answer in 1-2 sentences. State only the conclusion, no elaboration.",
     "detailed": "Provide a comprehensive, structured answer with clear sections.",
@@ -49,18 +48,21 @@ _STYLE_PROMPTS = {
     "ref":      "Provide a detailed, evidence-based answer. Conclude with a References section citing authoritative sources.",
 }
 
-# Chinese keyword patterns for BelleGroup auto-labelling
-_ZH_JUDGMENT_RE = re.compile(r"应该|需不需要|要不要|该不该|是否|能不能|可以吗|对吗|好吗|可行")
-_ZH_EXPLANATION_RE = re.compile(r"为什么|是什么|什么是|解释|说明|介绍|如何理解")
-_ZH_CREATIVE_RE = re.compile(r"写一|写个|帮我写|创作|生成一|写一篇")
-_ZH_PLAN_RE = re.compile(r"如何|怎么|怎样|步骤|方法|流程|怎么做")
+# Ordered (task_type, style, regex) entries — first match wins
+_ZH_CLASSIFY_RULES = [
+    ("judgment",    "brief",    re.compile(r"应该|需不需要|要不要|该不该|是否|能不能|可以吗|对吗|好吗|可行")),
+    ("explanation", "detailed", re.compile(r"为什么|是什么|什么是|解释|说明|介绍|如何理解")),
+    ("creative",    "detailed", re.compile(r"写一|写个|帮我写|创作|生成一|写一篇")),
+    ("plan",        "detailed", re.compile(r"如何|怎么|怎样|步骤|方法|流程|怎么做")),
+]
 _ZH_REF_RE = re.compile(r"医|药|病|症|健康|法律|法规|政策|科学|研究|论文")
 
-# English keyword patterns for OpenOrca auto-labelling
-_EN_EXPLANATION_RE = re.compile(r"\bwhy\b|\bexplain\b|what is\b|\bdescribe\b", re.I)
-_EN_JUDGMENT_RE = re.compile(r"\bshould\b|is it\b|can i\b|do i need\b", re.I)
-_EN_CREATIVE_RE = re.compile(r"\bwrite\b|\bcreate\b|\bgenerate\b|\bcompose\b", re.I)
-_EN_PLAN_RE = re.compile(r"how to\b|how do\b|\bsteps\b|\bguide\b", re.I)
+_EN_CLASSIFY_RULES = [
+    ("judgment",    "brief",    re.compile(r"\bshould\b|is it\b|can i\b|do i need\b", re.I)),
+    ("explanation", "detailed", re.compile(r"\bwhy\b|\bexplain\b|what is\b|\bdescribe\b", re.I)),
+    ("creative",    "detailed", re.compile(r"\bwrite\b|\bcreate\b|\bgenerate\b|\bcompose\b", re.I)),
+    ("plan",        "detailed", re.compile(r"how to\b|how do\b|\bsteps\b|\bguide\b", re.I)),
+]
 _EN_REF_RE = re.compile(r"\bmedical\b|\bresearch\b|\bstudy\b|\bevidence\b|\blegal\b|\bscientific\b", re.I)
 
 # Regex to detect style-directive language in OpenOrca system prompts
@@ -81,7 +83,7 @@ def _clean(text: str) -> str:
 
 
 def _write_jsonl(path: str, records: list) -> None:
-    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for rec in records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -102,36 +104,36 @@ def _make_style_prompt(task_type: str, style: str, ref: str) -> str:
     return _STYLE_PROMPTS.get(style, _STYLE_PROMPTS["detailed"])
 
 
-def _zh_classify(text: str):
-    """Return (task_type, style, ref) for a Chinese instruction via keyword heuristics."""
-    if _ZH_JUDGMENT_RE.search(text):
-        task_type, style = "judgment", "brief"
-    elif _ZH_EXPLANATION_RE.search(text):
-        task_type, style = "explanation", "detailed"
-    elif _ZH_CREATIVE_RE.search(text):
-        task_type, style = "creative", "detailed"
-    elif _ZH_PLAN_RE.search(text):
-        task_type, style = "plan", "detailed"
+def _classify(text: str, rules: list, ref_re) -> tuple:
+    """Return (task_type, style, ref) using the first matching rule."""
+    for task_type, style, pattern in rules:
+        if pattern.search(text):
+            break
     else:
         task_type, style = "fact", "brief"
-    ref = "yes" if _ZH_REF_RE.search(text) else "no"
+    ref = "yes" if ref_re.search(text) else "no"
     return task_type, style, ref
 
 
-def _en_classify(text: str):
-    """Return (task_type, style, ref) for an English query via keyword heuristics."""
-    if _EN_JUDGMENT_RE.search(text):
-        task_type, style = "judgment", "brief"
-    elif _EN_EXPLANATION_RE.search(text):
-        task_type, style = "explanation", "detailed"
-    elif _EN_CREATIVE_RE.search(text):
-        task_type, style = "creative", "detailed"
-    elif _EN_PLAN_RE.search(text):
-        task_type, style = "plan", "detailed"
-    else:
-        task_type, style = "fact", "brief"
-    ref = "yes" if _EN_REF_RE.search(text) else "no"
-    return task_type, style, ref
+def _load_medical_queries(path: str, rng: random.Random) -> list:
+    """Read all user queries from a MiniMind SFT JSONL file, shuffled."""
+    queries = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                user_turns = [t for t in obj.get("conversations", []) if t.get("role") == "user"]
+                if user_turns:
+                    q = _clean(user_turns[0]["content"])
+                    if len(q) >= 5:
+                        queries.append(q)
+            except (json.JSONDecodeError, KeyError):
+                continue
+    rng.shuffle(queries)
+    return queries
 
 
 def _preview(name: str, records: list, n: int = 3) -> None:
@@ -147,9 +149,29 @@ def _preview(name: str, records: list, n: int = 3) -> None:
 # Model A: Intent Tagger dataset
 # ---------------------------------------------------------------------------
 
-def build_intent_tagger_data(belle_samples: int, medical_samples: int, seed: int) -> list:
+def build_intent_tagger_data(
+    belle_samples: int,
+    medical_queries: list,
+    medical_samples: int,
+    seed: int,
+) -> tuple:
+    """Returns (sft_records, tag_meta).
+
+    tag_meta is a list of (query, task_type, style, ref) tuples passed to the
+    augmenter builder so it can derive style prompts without re-parsing strings.
+    """
     rng = random.Random(seed)
     records = []
+    tag_meta = []  # (query, task_type, style, ref)
+
+    def _add(query: str, task_type: str, style: str, ref: str) -> None:
+        records.append({
+            "conversations": [
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": _make_tag(task_type, style, ref)},
+            ]
+        })
+        tag_meta.append((query, task_type, style, ref))
 
     # Source 1: databricks/databricks-dolly-15k
     print("  Loading databricks/databricks-dolly-15k ...")
@@ -162,73 +184,42 @@ def build_intent_tagger_data(belle_samples: int, medical_samples: int, seed: int
             continue
         task_type, style, ref = DOLLY_TAG_MAP[category]
         query = f"{instruction}\n\n{context}" if context else instruction
-        records.append({
-            "conversations": [
-                {"role": "user", "content": query},
-                {"role": "assistant", "content": _make_tag(task_type, style, ref)},
-            ]
-        })
+        _add(query, task_type, style, ref)
     print(f"  Dolly: {len(records):,} examples")
 
-    # Source 2: BelleGroup/train_0.5M_CN (streaming)
-    print(f"  Loading BelleGroup/train_0.5M_CN (streaming, target {belle_samples:,}) ...")
+    # Source 2: BelleGroup/train_0.5M_CN (reservoir sampling — O(belle_samples) memory)
+    print(f"  Loading BelleGroup/train_0.5M_CN (streaming, sample {belle_samples:,}) ...")
     belle_stream = load_dataset("BelleGroup/train_0.5M_CN", split="train", streaming=True)
-    pool = []
-    for row in belle_stream:
+    reservoir = []
+    for i, row in enumerate(belle_stream):
         instr = _clean(row.get("instruction", "") or "")
         if len(instr) < 10:
             continue
-        pool.append(instr)
-        if len(pool) >= belle_samples * 4:
-            break
-    rng.shuffle(pool)
-    belle_added = 0
-    for instr in pool[:belle_samples]:
-        task_type, style, ref = _zh_classify(instr)
-        records.append({
-            "conversations": [
-                {"role": "user", "content": instr},
-                {"role": "assistant", "content": _make_tag(task_type, style, ref)},
-            ]
-        })
-        belle_added += 1
-    print(f"  BelleGroup: {belle_added:,} examples")
+        if len(reservoir) < belle_samples:
+            reservoir.append(instr)
+        else:
+            j = rng.randint(0, i)
+            if j < belle_samples:
+                reservoir[j] = instr
+    belle_start = len(records)
+    for instr in reservoir:
+        task_type, style, ref = _classify(instr, _ZH_CLASSIFY_RULES, _ZH_REF_RE)
+        _add(instr, task_type, style, ref)
+    print(f"  BelleGroup: {len(records) - belle_start:,} examples")
 
-    # Source 3: local sft_medical.jsonl (ref:yes bucket)
-    medical_path = os.path.join(OUT_DIR, "sft_medical.jsonl")
-    if os.path.exists(medical_path):
-        print(f"  Loading sft_medical.jsonl (sample {medical_samples:,}) ...")
-        queries = []
-        with open(medical_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    user_turns = [t for t in obj.get("conversations", []) if t.get("role") == "user"]
-                    if user_turns:
-                        q = _clean(user_turns[0]["content"])
-                        if len(q) >= 5:
-                            queries.append(q)
-                except (json.JSONDecodeError, KeyError):
-                    continue
-        rng.shuffle(queries)
-        med_added = 0
-        for q in queries[:medical_samples]:
-            records.append({
-                "conversations": [
-                    {"role": "user", "content": q},
-                    {"role": "assistant", "content": _make_tag("explanation", "detailed", "yes")},
-                ]
-            })
-            med_added += 1
-        print(f"  Medical: {med_added:,} examples (ref:yes)")
-    else:
-        print("  sft_medical.jsonl not found — skipping medical source")
+    # Source 3: pre-loaded medical queries (ref:yes bucket)
+    med_start = len(records)
+    for q in medical_queries[:medical_samples]:
+        _add(q, "explanation", "detailed", "yes")
+    print(f"  Medical: {len(records) - med_start:,} examples (ref:yes)")
 
-    rng.shuffle(records)
-    return records
+    # Shuffle records and tag_meta together
+    indices = list(range(len(records)))
+    rng.shuffle(indices)
+    records = [records[i] for i in indices]
+    tag_meta = [tag_meta[i] for i in indices]
+
+    return records, tag_meta
 
 
 # ---------------------------------------------------------------------------
@@ -236,29 +227,18 @@ def build_intent_tagger_data(belle_samples: int, medical_samples: int, seed: int
 # ---------------------------------------------------------------------------
 
 def build_prompt_augmenter_data(
+    tag_meta: list,
     orca_samples: int,
+    medical_queries: list,
     medical_samples: int,
     seed: int,
-    tagger_records: list,
 ) -> list:
     rng = random.Random(seed)
     records = []
 
-    # Source 1: derive from tagger records (rule-generated system prompts)
-    for rec in tagger_records:
-        convs = rec["conversations"]
-        query = convs[0]["content"]
-        tag = convs[1]["content"]
-        # Parse tag string back to (type, style, ref)
-        parts = {}
-        for segment in tag.split("|"):
-            segment = segment.strip()
-            if ":" in segment:
-                k, v = segment.split(":", 1)
-                parts[k.strip()] = v.strip()
-        task_type = parts.get("type", "fact")
-        style = parts.get("style", "brief")
-        ref = parts.get("ref", "no")
+    # Source 1: derive from tagger tag_meta (structured tuples — no string parsing needed)
+    for query, task_type, style, ref in tag_meta:
+        tag = _make_tag(task_type, style, ref)
         style_prompt = _make_style_prompt(task_type, style, ref)
         records.append({
             "conversations": [
@@ -276,13 +256,12 @@ def build_prompt_augmenter_data(
         question = _clean(row.get("question", "") or "")
         if not question or not sys_prompt or not _ORCA_STYLE_RE.search(sys_prompt):
             continue
-        sys_prompt = _clean(sys_prompt)
-        task_type, style, ref = _en_classify(question)
+        task_type, style, ref = _classify(question, _EN_CLASSIFY_RULES, _EN_REF_RE)
         tag = _make_tag(task_type, style, ref)
         records.append({
             "conversations": [
                 {"role": "user", "content": f"Query: {question}\nTags: {tag}"},
-                {"role": "assistant", "content": f"System: {sys_prompt}\nQuery: {question}"},
+                {"role": "assistant", "content": f"System: {_clean(sys_prompt)}\nQuery: {question}"},
             ]
         })
         orca_added += 1
@@ -290,38 +269,18 @@ def build_prompt_augmenter_data(
             break
     print(f"  OpenOrca: {orca_added:,} examples with style prompts")
 
-    # Source 3: medical queries with reference-requiring prompt
-    medical_path = os.path.join(OUT_DIR, "sft_medical.jsonl")
-    if os.path.exists(medical_path):
-        print(f"  Loading sft_medical.jsonl for augmenter (sample {medical_samples:,}) ...")
-        queries = []
-        with open(medical_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    user_turns = [t for t in obj.get("conversations", []) if t.get("role") == "user"]
-                    if user_turns:
-                        q = _clean(user_turns[0]["content"])
-                        if len(q) >= 5:
-                            queries.append(q)
-                except (json.JSONDecodeError, KeyError):
-                    continue
-        rng.shuffle(queries)
-        med_added = 0
-        tag = _make_tag("explanation", "detailed", "yes")
-        ref_prompt = _STYLE_PROMPTS["ref"]
-        for q in queries[:medical_samples]:
-            records.append({
-                "conversations": [
-                    {"role": "user", "content": f"Query: {q}\nTags: {tag}"},
-                    {"role": "assistant", "content": f"System: {ref_prompt}\nQuery: {q}"},
-                ]
-            })
-            med_added += 1
-        print(f"  Medical augmenter: {med_added:,} examples (ref:yes)")
+    # Source 3: medical queries with reference-requiring system prompt
+    ref_prompt = _STYLE_PROMPTS["ref"]
+    med_tag = _make_tag("explanation", "detailed", "yes")
+    med_start = len(records)
+    for q in medical_queries[:medical_samples]:
+        records.append({
+            "conversations": [
+                {"role": "user", "content": f"Query: {q}\nTags: {med_tag}"},
+                {"role": "assistant", "content": f"System: {ref_prompt}\nQuery: {q}"},
+            ]
+        })
+    print(f"  Medical augmenter: {len(records) - med_start:,} examples (ref:yes)")
 
     rng.shuffle(records)
     return records
@@ -345,10 +304,22 @@ def main():
     args = parser.parse_args()
 
     random.seed(args.seed)
+    rng = random.Random(args.seed)
+
+    # Load medical queries once; reused by both builders
+    medical_queries = []
+    medical_path = os.path.join(OUT_DIR, "sft_medical.jsonl")
+    if os.path.exists(medical_path):
+        print(f"Pre-loading sft_medical.jsonl ...")
+        medical_queries = _load_medical_queries(medical_path, rng)
+        print(f"  {len(medical_queries):,} medical queries loaded")
+    else:
+        print("sft_medical.jsonl not found — skipping medical source")
 
     print("\n=== Building Intent Tagger dataset (Model A) ===")
-    tagger_records = build_intent_tagger_data(
+    tagger_records, tag_meta = build_intent_tagger_data(
         belle_samples=args.belle_samples,
+        medical_queries=medical_queries,
         medical_samples=args.medical_samples,
         seed=args.seed,
     )
@@ -358,10 +329,11 @@ def main():
 
     print("\n=== Building Prompt Augmenter dataset (Model B) ===")
     augmenter_records = build_prompt_augmenter_data(
+        tag_meta=tag_meta,
         orca_samples=args.orca_samples,
+        medical_queries=medical_queries,
         medical_samples=args.medical_samples,
         seed=args.seed,
-        tagger_records=tagger_records,
     )
     augmenter_path = os.path.join(OUT_DIR, "sft_prompt_augmenter.jsonl")
     _write_jsonl(augmenter_path, augmenter_records)

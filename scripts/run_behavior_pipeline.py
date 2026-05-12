@@ -10,8 +10,8 @@ Usage:
 """
 
 import argparse
-import sys
 import os
+import sys
 import warnings
 
 import torch
@@ -23,22 +23,20 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 
+_MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model"))
+
 
 def _load_model(weight_name: str, save_dir: str, hidden_size: int, num_layers: int, device: str):
-    tokenizer = AutoTokenizer.from_pretrained(
-        os.path.join(os.path.dirname(__file__), "..", "model")
-    )
     model = MiniMindForCausalLM(
         MiniMindConfig(hidden_size=hidden_size, num_hidden_layers=num_layers)
     )
     ckp = os.path.join(save_dir, f"{weight_name}_{hidden_size}.pth")
     if not os.path.exists(ckp):
         raise FileNotFoundError(f"Checkpoint not found: {ckp}")
-    model.load_state_dict(torch.load(ckp, map_location=device), strict=True)
+    model.load_state_dict(torch.load(ckp, map_location=device, weights_only=False), strict=True)
     model = model.half()
-    model.train(False)  # equivalent to model.eval()
-    model = model.to(device)
-    return model, tokenizer
+    model.train(False)
+    return model.to(device)
 
 
 @torch.inference_mode()
@@ -60,20 +58,13 @@ def _generate(model, tokenizer, prompt: str, device: str, max_new_tokens: int = 
     return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
-def run_pipeline(
-    query: str,
-    tagger_model,
-    augmenter_model,
-    tokenizer,
-    device: str,
-) -> dict:
-    # Step 1: Model A — intent tags
+def run_pipeline(query: str, tagger_model, augmenter_model, tokenizer, device: str) -> dict:
     tags = _generate(tagger_model, tokenizer, query, device, max_new_tokens=32)
-
-    # Step 2: Model B — system prompt
-    augmenter_input = f"Query: {query}\nTags: {tags}"
-    system_prompt = _generate(augmenter_model, tokenizer, augmenter_input, device, max_new_tokens=128)
-
+    system_prompt = _generate(
+        augmenter_model, tokenizer,
+        f"Query: {query}\nTags: {tags}",
+        device, max_new_tokens=128,
+    )
     return {"query": query, "tags": tags, "system_prompt": system_prompt}
 
 
@@ -89,18 +80,18 @@ def main():
                         help="Model B weight prefix (default: prompt_augmenter)")
     parser.add_argument("--hidden_size", type=int, default=768)
     parser.add_argument("--num_hidden_layers", type=int, default=8)
-    parser.add_argument("--device",
-                        default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     save_dir = os.path.abspath(args.save_dir)
+    tokenizer = AutoTokenizer.from_pretrained(_MODEL_DIR)
 
     print("Loading Model A (Intent Tagger) ...")
-    tagger_model, tokenizer = _load_model(
+    tagger_model = _load_model(
         args.tagger_weight, save_dir, args.hidden_size, args.num_hidden_layers, args.device
     )
     print("Loading Model B (Prompt Augmenter) ...")
-    augmenter_model, _ = _load_model(
+    augmenter_model = _load_model(
         args.augmenter_weight, save_dir, args.hidden_size, args.num_hidden_layers, args.device
     )
     print("Models ready.\n")

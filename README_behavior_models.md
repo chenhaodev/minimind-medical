@@ -1,28 +1,35 @@
 # MiniMind-BehaviorModels
 
-Two small LLMs (~64M parameters each) built on [MiniMind](https://github.com/jingyaogong/minimind) that implement a simplified version of the **User Behavior Theory** for LLM products.
+A single small LLM (~64M parameters) built on [MiniMind](https://github.com/jingyaogong/minimind) that implements a simplified version of the **User Behavior Theory** for LLM products.
 
 **Pipeline**:
 ```
-User Query → [Model A: Intent Tagger] → intent tags → [Model B: Prompt Augmenter] → crafted system prompt → [Any LLM API]
+User Query → [Behavior Model] → intent tags + system prompt → [Any LLM API]
 ```
 
-- **Model A** classifies a query into compact intent tags (`type`, `style`, `ref`).
-- **Model B** takes the query + tags and outputs a system prompt that instructs a downstream LLM to respond with the right style: concise for conclusive questions, detailed for open-ended ones, with references for professional topics.
+The model outputs two parts separated by a blank line:
+```
+type:explanation | style:detailed | ref:yes
 
-Neither model needs domain knowledge — they only learn structural patterns — which is why 64M parameters is sufficient.
+Provide a comprehensive, structured answer. Conclude with a References section.
+```
+
+The calling code splits on the first blank line: `tags, system_prompt = output.split('\n\n', 1)`.
+
+Neither model needs domain knowledge — it only learns structural patterns — which is why 64M parameters is sufficient.
 
 ---
 
 ## Dataset Sources
 
-### Intent Tagger (`dataset/sft_intent_tagger.jsonl`)
+### Combined dataset (`dataset/sft_behavior_combined.jsonl`)
 
 | Source | Dataset | Records | Transform |
 |--------|---------|---------|-----------|
-| EN | [databricks/databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | ~15k | Map 8 categories → intent tag string |
-| ZH | [BelleGroup/train_0.5M_CN](https://huggingface.co/datasets/BelleGroup/train_0.5M_CN) | ~10k (sampled) | Keyword heuristic tagging |
-| ZH | `dataset/sft_medical.jsonl` (local) | ~2k (sampled) | Fixed tag `type:explanation \| style:detailed \| ref:yes` |
+| EN | [databricks/databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) | ~15k | Map 8 categories → tag + rule-generated prompt |
+| ZH | [BelleGroup/train_0.5M_CN](https://huggingface.co/datasets/BelleGroup/train_0.5M_CN) | ~50k (sampled) | Keyword heuristic tag + rule-generated prompt |
+| ZH | `dataset/sft_medical.jsonl` (local) | ~2k (sampled) | Fixed `type:explanation \| style:detailed \| ref:yes` + ref prompt |
+| EN | [Open-Orca/OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca) | ~20k (filtered) | Inferred tag + real Orca system prompt |
 
 Tag format: `type:{X} | style:{Y} | ref:{Z}`
 
@@ -31,14 +38,6 @@ Tag format: `type:{X} | style:{Y} | ref:{Z}`
 | `type` | `fact`, `judgment`, `explanation`, `creative`, `plan` |
 | `style` | `brief`, `detailed` |
 | `ref` | `yes`, `no` |
-
-### Prompt Augmenter (`dataset/sft_prompt_augmenter.jsonl`)
-
-| Source | Dataset | Records | Transform |
-|--------|---------|---------|-----------|
-| EN/ZH | Derived from intent tagger data | ~27k | Rule-generate style prompt from tag |
-| EN | [Open-Orca/OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca) | ~5k (filtered) | Filter system prompts with style directives |
-| ZH | `dataset/sft_medical.jsonl` (local) | ~2k (sampled) | Reference-requiring system prompt |
 
 ---
 
@@ -52,9 +51,9 @@ Key flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--belle_samples` | 10000 | BelleGroup ZH examples for the tagger |
-| `--medical_samples` | 2000 | Medical examples per dataset |
-| `--orca_samples` | 5000 | OpenOrca examples for the augmenter |
+| `--belle_samples` | 50000 | BelleGroup ZH examples |
+| `--medical_samples` | 2000 | Medical examples |
+| `--orca_samples` | 20000 | OpenOrca examples |
 | `--seed` | 42 | Random seed for reproducibility |
 | `--preview_n` | 3 | Samples to print per dataset |
 
@@ -62,47 +61,27 @@ Set `HF_ENDPOINT=https://hf-mirror.com` if you need to use a HuggingFace mirror 
 
 ---
 
-## Step 2 — Train Model A (Intent Tagger)
+## Step 2 — Train
 
-Fine-tunes on query → compact tag pairs. Short `max_seq_len` (256) because outputs are always ≤20 tokens.
+Fine-tunes on query → (tags + system prompt) pairs.
 
 ```bash
 python trainer/train_full_sft.py \
-  --data_path dataset/sft_intent_tagger.jsonl \
+  --data_path dataset/sft_behavior_combined.jsonl \
   --from_weight pretrain \
-  --save_weight intent_tagger \
-  --epochs 5 \
+  --save_weight behavior_model \
+  --epochs 3 \
   --batch_size 32 \
   --learning_rate 2e-5 \
-  --max_seq_len 256 \
-  --empty_think_ratio 0
-```
-
-Output checkpoint: `out/intent_tagger_768.pth`
-
----
-
-## Step 3 — Train Model B (Prompt Augmenter)
-
-Fine-tunes on (query + tags) → system prompt pairs. Longer `max_seq_len` (512) for richer outputs.
-
-```bash
-python trainer/train_full_sft.py \
-  --data_path dataset/sft_prompt_augmenter.jsonl \
-  --from_weight pretrain \
-  --save_weight prompt_augmenter \
-  --epochs 3 \
-  --batch_size 16 \
-  --learning_rate 1e-5 \
   --max_seq_len 512 \
   --empty_think_ratio 0
 ```
 
-Output checkpoint: `out/prompt_augmenter_768.pth`
+Output checkpoint: `out/behavior_model_768.pth`
 
 ---
 
-## Step 4 — Run the Pipeline
+## Step 3 — Run the Pipeline
 
 ```bash
 # Single query
@@ -112,7 +91,7 @@ python scripts/run_behavior_pipeline.py --query "今天需不需要看病？"
 python scripts/run_behavior_pipeline.py
 ```
 
-Example outputs to verify each model:
+Example outputs:
 
 | Query | Expected Tags | Expected System Prompt style |
 |-------|--------------|------------------------------|
@@ -128,16 +107,14 @@ Example outputs to verify each model:
 minimind/
 ├── scripts/
 │   ├── prepare_behavior_data.py     # Dataset download + transform pipeline
-│   └── run_behavior_pipeline.py     # End-to-end demo: Model A → Model B
+│   └── run_behavior_pipeline.py     # End-to-end demo: query → tags + system prompt
 ├── dataset/
-│   ├── sft_intent_tagger.jsonl      # Generated: Model A training data
-│   └── sft_prompt_augmenter.jsonl   # Generated: Model B training data
+│   └── sft_behavior_combined.jsonl  # Generated: training data
 ├── trainer/
 │   └── train_full_sft.py            # SFT trainer (used as-is)
 ├── out/
 │   ├── pretrain_768.pth             # Base weights (user provides)
-│   ├── intent_tagger_768.pth        # Model A checkpoint
-│   └── prompt_augmenter_768.pth     # Model B checkpoint
+│   └── behavior_model_768.pth       # Trained checkpoint
 └── eval_llm.py                      # Interactive inference (MiniMind standard)
 ```
 
@@ -145,9 +122,9 @@ minimind/
 
 ## Notes
 
-- Model A uses a higher learning rate (`2e-5`) and more epochs (5) because its output vocabulary is constrained — it only needs to learn one fixed template pattern.
-- Model B uses a lower learning rate (`1e-5`) since it generates longer, more varied outputs.
 - The base MiniMind pretrain weights must exist at `out/pretrain_768.pth` before training. Follow the main [MiniMind training guide](README_en.md) to obtain them.
+- The model output is always `tags\n\nsystem_prompt`. Split on the first blank line to get both parts.
+- The Orca source contributes real (non-rule-generated) system prompts which improve output diversity.
 
 ### RunPod tips
 
@@ -163,5 +140,5 @@ torchrun --nproc_per_node=N trainer/train_full_sft.py [same args]
 
 Download trained weights after training:
 ```bash
-zip behavior_models.zip out/intent_tagger_768.pth out/prompt_augmenter_768.pth
+zip behavior_models.zip out/behavior_model_768.pth
 ```

@@ -1,8 +1,12 @@
 """
 User Behavior Theory — end-to-end inference pipeline.
 
-Chains Model A (Intent Tagger) and Model B (Prompt Augmenter) to transform a
-raw user query into a crafted system prompt ready for any downstream LLM API.
+A single model transforms a raw user query into intent tags and a crafted
+system prompt ready for any downstream LLM API.
+
+Output format:  type:X | style:Y | ref:Z
+                <blank line>
+                <system prompt>
 
 Usage:
   python scripts/run_behavior_pipeline.py --query "今天需不需要看病？"
@@ -40,7 +44,7 @@ def _load_model(weight_name: str, save_dir: str, hidden_size: int, num_layers: i
 
 
 @torch.inference_mode()
-def _generate(model, tokenizer, prompt: str, device: str, max_new_tokens: int = 128) -> str:
+def _generate(model, tokenizer, prompt: str, device: str, max_new_tokens: int = 160) -> str:
     conversation = [{"role": "user", "content": prompt}]
     inputs_text = tokenizer.apply_chat_template(
         conversation, tokenize=False, add_generation_prompt=True
@@ -50,7 +54,6 @@ def _generate(model, tokenizer, prompt: str, device: str, max_new_tokens: int = 
         **inputs,
         max_new_tokens=max_new_tokens,
         do_sample=False,
-        temperature=1.0,
         eos_token_id=tokenizer.eos_token_id,
         pad_token_id=tokenizer.pad_token_id,
     )
@@ -58,14 +61,24 @@ def _generate(model, tokenizer, prompt: str, device: str, max_new_tokens: int = 
     return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
-def run_pipeline(query: str, tagger_model, augmenter_model, tokenizer, device: str) -> dict:
-    tags = _generate(tagger_model, tokenizer, query, device, max_new_tokens=32)
-    system_prompt = _generate(
-        augmenter_model, tokenizer,
-        f"Query: {query}\nTags: {tags}",
-        device, max_new_tokens=128,
-    )
+def _parse_output(raw: str) -> tuple[str, str]:
+    parts = raw.split("\n\n", 1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    return raw.strip(), ""
+
+
+def run_pipeline(query: str, model, tokenizer, device: str) -> dict:
+    raw = _generate(model, tokenizer, query, device)
+    tags, system_prompt = _parse_output(raw)
     return {"query": query, "tags": tags, "system_prompt": system_prompt}
+
+
+def _show(result: dict) -> None:
+    print(f"Query      : {result['query']}")
+    print(f"Tags       : {result['tags']}")
+    print(f"SysPrompt  : {result['system_prompt']}")
+    print()
 
 
 def main():
@@ -74,10 +87,8 @@ def main():
                         help="Input user query (omit for interactive mode)")
     parser.add_argument("--save_dir", default="out",
                         help="Checkpoint directory (default: out)")
-    parser.add_argument("--tagger_weight", default="intent_tagger",
-                        help="Model A weight prefix (default: intent_tagger)")
-    parser.add_argument("--augmenter_weight", default="prompt_augmenter",
-                        help="Model B weight prefix (default: prompt_augmenter)")
+    parser.add_argument("--weight", default="behavior_model",
+                        help="Model weight prefix (default: behavior_model)")
     parser.add_argument("--hidden_size", type=int, default=768)
     parser.add_argument("--num_hidden_layers", type=int, default=8)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -86,24 +97,14 @@ def main():
     save_dir = os.path.abspath(args.save_dir)
     tokenizer = AutoTokenizer.from_pretrained(_MODEL_DIR)
 
-    print("Loading Model A (Intent Tagger) ...")
-    tagger_model = _load_model(
-        args.tagger_weight, save_dir, args.hidden_size, args.num_hidden_layers, args.device
+    print("Loading behavior model ...")
+    model = _load_model(
+        args.weight, save_dir, args.hidden_size, args.num_hidden_layers, args.device
     )
-    print("Loading Model B (Prompt Augmenter) ...")
-    augmenter_model = _load_model(
-        args.augmenter_weight, save_dir, args.hidden_size, args.num_hidden_layers, args.device
-    )
-    print("Models ready.\n")
-
-    def _show(result: dict) -> None:
-        print(f"Query      : {result['query']}")
-        print(f"Tags       : {result['tags']}")
-        print(f"SysPrompt  : {result['system_prompt']}")
-        print()
+    print("Model ready.\n")
 
     if args.query:
-        _show(run_pipeline(args.query, tagger_model, augmenter_model, tokenizer, args.device))
+        _show(run_pipeline(args.query, model, tokenizer, args.device))
     else:
         print("Interactive mode — enter a query (Ctrl+C to quit)\n")
         try:
@@ -111,7 +112,7 @@ def main():
                 query = input("Query: ").strip()
                 if not query:
                     continue
-                _show(run_pipeline(query, tagger_model, augmenter_model, tokenizer, args.device))
+                _show(run_pipeline(query, model, tokenizer, args.device))
         except (KeyboardInterrupt, EOFError):
             print("\nDone.")
 

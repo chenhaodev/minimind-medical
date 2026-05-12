@@ -2,8 +2,7 @@
 User Behavior Theory SFT dataset preparation for MiniMind.
 
 Outputs:
-  dataset/sft_intent_tagger.jsonl     - Model A training data (query → intent tags)
-  dataset/sft_prompt_augmenter.jsonl  - Model B training data (query+tags → system prompt)
+  dataset/sft_behavior_combined.jsonl - Single model training data (query → tags + system prompt)
 
 Usage:
   python scripts/prepare_behavior_data.py
@@ -146,32 +145,17 @@ def _preview(name: str, records: list, n: int = 3) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Model A: Intent Tagger dataset
+# Build tag metadata: (query, task_type, style, ref) tuples
 # ---------------------------------------------------------------------------
 
-def build_intent_tagger_data(
+def build_tag_meta(
     belle_samples: int,
     medical_queries: list,
     medical_samples: int,
     seed: int,
-) -> tuple:
-    """Returns (sft_records, tag_meta).
-
-    tag_meta is a list of (query, task_type, style, ref) tuples passed to the
-    augmenter builder so it can derive style prompts without re-parsing strings.
-    """
+) -> list:
     rng = random.Random(seed)
-    records = []
-    tag_meta = []  # (query, task_type, style, ref)
-
-    def _add(query: str, task_type: str, style: str, ref: str) -> None:
-        records.append({
-            "conversations": [
-                {"role": "user", "content": query},
-                {"role": "assistant", "content": _make_tag(task_type, style, ref)},
-            ]
-        })
-        tag_meta.append((query, task_type, style, ref))
+    tag_meta = []
 
     # Source 1: databricks/databricks-dolly-15k
     print("  Loading databricks/databricks-dolly-15k ...")
@@ -184,8 +168,8 @@ def build_intent_tagger_data(
             continue
         task_type, style, ref = DOLLY_TAG_MAP[category]
         query = f"{instruction}\n\n{context}" if context else instruction
-        _add(query, task_type, style, ref)
-    print(f"  Dolly: {len(records):,} examples")
+        tag_meta.append((query, task_type, style, ref))
+    print(f"  Dolly: {len(tag_meta):,} examples")
 
     # Source 2: BelleGroup/train_0.5M_CN (reservoir sampling — O(belle_samples) memory)
     print(f"  Loading BelleGroup/train_0.5M_CN (streaming, sample {belle_samples:,}) ...")
@@ -203,86 +187,70 @@ def build_intent_tagger_data(
             if j < belle_samples:
                 reservoir[j] = instr
         valid_count += 1
-    belle_start = len(records)
+    belle_start = len(tag_meta)
     for instr in reservoir:
         task_type, style, ref = _classify(instr, _ZH_CLASSIFY_RULES, _ZH_REF_RE)
-        _add(instr, task_type, style, ref)
-    print(f"  BelleGroup: {len(records) - belle_start:,} examples")
+        tag_meta.append((instr, task_type, style, ref))
+    print(f"  BelleGroup: {len(tag_meta) - belle_start:,} examples")
 
     # Source 3: pre-loaded medical queries (ref:yes bucket)
-    med_start = len(records)
+    med_start = len(tag_meta)
     for q in medical_queries[:medical_samples]:
-        _add(q, "explanation", "detailed", "yes")
-    print(f"  Medical: {len(records) - med_start:,} examples (ref:yes)")
+        tag_meta.append((q, "explanation", "detailed", "yes"))
+    print(f"  Medical: {len(tag_meta) - med_start:,} examples (ref:yes)")
 
-    # Shuffle records and tag_meta together
-    indices = list(range(len(records)))
-    rng.shuffle(indices)
-    records = [records[i] for i in indices]
-    tag_meta = [tag_meta[i] for i in indices]
-
-    return records, tag_meta
+    rng.shuffle(tag_meta)
+    return tag_meta
 
 
 # ---------------------------------------------------------------------------
-# Model B: Prompt Augmenter dataset
+# Combined: single model — query → tags + system prompt
 # ---------------------------------------------------------------------------
 
-def build_prompt_augmenter_data(
+def build_combined_data(
     tag_meta: list,
     orca_samples: int,
-    medical_queries: list,
-    medical_samples: int,
     seed: int,
 ) -> list:
     rng = random.Random(seed)
     records = []
 
-    # Source 1: derive from tagger tag_meta (structured tuples — no string parsing needed)
+    # Source 1: Dolly + Belle + Medical
     for query, task_type, style, ref in tag_meta:
         tag = _make_tag(task_type, style, ref)
-        style_prompt = _make_style_prompt(task_type, style, ref)
+        system_prompt = _make_style_prompt(task_type, style, ref)
         records.append({
             "conversations": [
-                {"role": "user", "content": f"Query: {query}\nTags: {tag}"},
-                {"role": "assistant", "content": f"System: {style_prompt}\nQuery: {query}"},
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": f"{tag}\n\n{system_prompt}"},
             ]
         })
 
-    # Source 2: Open-Orca/OpenOrca — filter for style-directive system prompts
+    # Source 2: Open-Orca/OpenOrca — use real system prompts, infer tags from query
     print(f"  Loading Open-Orca/OpenOrca (streaming, target {orca_samples:,}) ...")
     orca_stream = load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
     orca_added = 0
     for row in orca_stream:
-        sys_prompt = row.get("system_prompt", "") or ""
-        question = _clean(row.get("question", "") or "")
-        if not question or not sys_prompt or not _ORCA_STYLE_RE.search(sys_prompt):
+        raw_sys = row.get("system_prompt", "") or ""
+        raw_q = row.get("question", "") or ""
+        if not raw_sys or not raw_q:
+            continue
+        sys_prompt = _clean(raw_sys)
+        question = _clean(raw_q)
+        if not _ORCA_STYLE_RE.search(sys_prompt):
             continue
         task_type, style, ref = _classify(question, _EN_CLASSIFY_RULES, _EN_REF_RE)
         tag = _make_tag(task_type, style, ref)
         records.append({
             "conversations": [
-                {"role": "user", "content": f"Query: {question}\nTags: {tag}"},
-                {"role": "assistant", "content": f"System: {_clean(sys_prompt)}\nQuery: {question}"},
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": f"{tag}\n\n{sys_prompt}"},
             ]
         })
         orca_added += 1
         if orca_added >= orca_samples:
             break
-    print(f"  OpenOrca: {orca_added:,} examples with style prompts")
-
-    # Source 3: medical queries with reference-requiring system prompt
-    ref_prompt = _STYLE_PROMPTS["ref"]
-    med_tag = _make_tag("explanation", "detailed", "yes")
-    med_start = len(records)
-    for q in medical_queries[:medical_samples]:
-        records.append({
-            "conversations": [
-                {"role": "user", "content": f"Query: {q}\nTags: {med_tag}"},
-                {"role": "assistant", "content": f"System: {ref_prompt}\nQuery: {q}"},
-            ]
-        })
-    print(f"  Medical augmenter: {len(records) - med_start:,} examples (ref:yes)")
+    print(f"  OpenOrca: {orca_added:,} examples")
 
     rng.shuffle(records)
     return records
@@ -294,21 +262,19 @@ def build_prompt_augmenter_data(
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare User Behavior Theory SFT datasets")
-    parser.add_argument("--belle_samples", type=int, default=10000,
-                        help="Max BelleGroup ZH examples for intent tagger (default: 10000)")
+    parser.add_argument("--belle_samples", type=int, default=50000,
+                        help="Max BelleGroup ZH examples for intent tagger (default: 50000)")
     parser.add_argument("--medical_samples", type=int, default=2000,
                         help="Max medical examples per dataset (default: 2000)")
-    parser.add_argument("--orca_samples", type=int, default=5000,
-                        help="Max OpenOrca examples for prompt augmenter (default: 5000)")
+    parser.add_argument("--orca_samples", type=int, default=20000,
+                        help="Max OpenOrca examples for prompt augmenter (default: 20000)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--preview_n", type=int, default=3,
                         help="Preview samples to print per dataset (default: 3)")
     args = parser.parse_args()
 
-    random.seed(args.seed)
     rng = random.Random(args.seed)
 
-    # Load medical queries once; reused by both builders
     medical_queries = []
     medical_path = os.path.join(OUT_DIR, "sft_medical.jsonl")
     if os.path.exists(medical_path):
@@ -318,34 +284,28 @@ def main():
     else:
         print("sft_medical.jsonl not found — skipping medical source")
 
-    print("\n=== Building Intent Tagger dataset (Model A) ===")
-    tagger_records, tag_meta = build_intent_tagger_data(
+    print("\n=== Building tag_meta (query → tags) ===")
+    tag_meta = build_tag_meta(
         belle_samples=args.belle_samples,
         medical_queries=medical_queries,
         medical_samples=args.medical_samples,
         seed=args.seed,
     )
-    tagger_path = os.path.join(OUT_DIR, "sft_intent_tagger.jsonl")
-    _write_jsonl(tagger_path, tagger_records)
-    _preview("Intent Tagger", tagger_records, args.preview_n)
 
-    print("\n=== Building Prompt Augmenter dataset (Model B) ===")
-    augmenter_records = build_prompt_augmenter_data(
+    print("\n=== Building Combined dataset (query → tags + system prompt) ===")
+    combined_records = build_combined_data(
         tag_meta=tag_meta,
         orca_samples=args.orca_samples,
-        medical_queries=medical_queries,
-        medical_samples=args.medical_samples,
         seed=args.seed,
     )
-    augmenter_path = os.path.join(OUT_DIR, "sft_prompt_augmenter.jsonl")
-    _write_jsonl(augmenter_path, augmenter_records)
-    _preview("Prompt Augmenter", augmenter_records, args.preview_n)
+    combined_path = os.path.join(OUT_DIR, "sft_behavior_combined.jsonl")
+    _write_jsonl(combined_path, combined_records)
+    _preview("Combined", combined_records, args.preview_n)
 
     print("\nDone. Run training next:")
-    print("  python trainer/train_full_sft.py --data_path dataset/sft_intent_tagger.jsonl "
-          "--from_weight pretrain --save_weight intent_tagger --epochs 5 --max_seq_len 256 --empty_think_ratio 0")
-    print("  python trainer/train_full_sft.py --data_path dataset/sft_prompt_augmenter.jsonl "
-          "--from_weight pretrain --save_weight prompt_augmenter --epochs 3 --max_seq_len 512 --empty_think_ratio 0")
+    print("  python trainer/train_full_sft.py --data_path dataset/sft_behavior_combined.jsonl "
+          "--from_weight pretrain --save_weight behavior_model --epochs 3 --batch_size 32 "
+          "--learning_rate 2e-5 --max_seq_len 512 --empty_think_ratio 0")
 
 
 if __name__ == "__main__":
